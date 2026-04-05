@@ -1,0 +1,5 @@
+Initial commit: Setup Tri-DB architecture and Next.js frontend skeleton
+
+- Configured PostgreSQL with pgvector and SQLAlchemy async models
+- Created Next.js frontend skeleton with Tailwind and shadcn/ui
+- Integrated Gemini 3.1 Pro via AI SDK for the Consultant chat interface
