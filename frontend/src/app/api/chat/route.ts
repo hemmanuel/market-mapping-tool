@@ -1,9 +1,13 @@
-import { google } from '@ai-sdk/google';
+import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { streamText, tool } from 'ai';
 import { z } from 'zod';
 
 // Allow streaming responses up to 30 seconds
 export const maxDuration = 30;
+
+const google = createGoogleGenerativeAI({
+  apiKey: process.env.GEMINI_API_KEY || '',
+});
 
 const marketMapSchema = z.object({
   niche_name: z.string().describe('The name of the market niche (e.g., "Solid State Batteries")'),
@@ -36,12 +40,19 @@ Once you have enough information to define the niche, the data sources, and the 
     tools: {
       finalize_market_map: tool({
         description: 'Generate the final JSON configuration for the market mapping ingestion pipeline.',
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        parameters: marketMapSchema as any
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      } as any)
+        parameters: marketMapSchema,
+        execute: async (config) => {
+          // In a real app, this might save to the database. 
+          // For now, we just return it so the UI can display it in the right pane.
+          return {
+            success: true,
+            message: 'Configuration generated successfully.',
+            config
+          };
+        }
+      })
     }
   });
 
-  return result.toTextStreamResponse();
+  return result.toDataStreamResponse();
 }
