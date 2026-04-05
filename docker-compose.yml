@@ -1,0 +1,56 @@
+version: '3.8'
+
+services:
+  # PostgreSQL with pgvector for Relational + Vector storage
+  postgres:
+    image: ankane/pgvector:latest
+    container_name: market_postgres
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: market_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  # Neo4j for Graph storage
+  neo4j:
+    image: neo4j:5.18.0
+    container_name: market_neo4j
+    environment:
+      NEO4J_AUTH: neo4j/password
+      # Enable APOC plugins for advanced graph algorithms
+      NEO4J_apoc_export_file_enabled: "true"
+      NEO4J_apoc_import_file_enabled: "true"
+      NEO4J_apoc_import_file_use__neo4j__config: "true"
+      NEO4J_PLUGINS: '["apoc"]'
+    ports:
+      - "7474:7474" # HTTP browser
+      - "7687:7687" # Bolt protocol
+    volumes:
+      - neo4j_data:/data
+    restart: unless-stopped
+
+  # Local LLM (Ollama) with GPU Passthrough
+  ollama:
+    image: ollama/ollama:latest
+    container_name: market_ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  neo4j_data:
+  ollama_data:

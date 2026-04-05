@@ -1,0 +1,14 @@
+langgraph
+langchain
+langchain-community
+langchain-core
+langchain-openai
+neo4j
+psycopg2-binary
+sqlalchemy
+asyncpg
+alembic
+pgvector
+feedparser
+pydantic
+python-dotenv
