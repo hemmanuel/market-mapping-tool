@@ -26,6 +26,7 @@ class Site(Base):
     tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"))
     name: Mapped[str] = mapped_column(String(255), nullable=False) # e.g., "Solid State Batteries"
     description: Mapped[Optional[str]] = mapped_column(Text)
+    ontology: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     tenant: Mapped["Tenant"] = relationship(back_populates="sites")

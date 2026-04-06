@@ -12,3 +12,5 @@ pgvector
 feedparser
 pydantic
 python-dotenv
+fastapi
+uvicorn

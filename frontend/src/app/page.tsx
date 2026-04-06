@@ -20,6 +20,9 @@ export default function OnboardingWizard() {
     sources: []
   });
 
+  const [isDeploying, setIsDeploying] = useState(false);
+  const [deploySuccess, setDeploySuccess] = useState(false);
+
   const { messages, input, handleInputChange, handleSubmit, isLoading } = useChat({
     api: "/api/chat",
     body: {
@@ -151,6 +154,30 @@ export default function OnboardingWizard() {
     }
   };
 
+  const handleDeploy = async () => {
+    setIsDeploying(true);
+    try {
+      const res = await fetch('http://localhost:8000/api/v1/pipelines', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(config),
+      });
+
+      if (!res.ok) {
+        throw new Error('Failed to deploy pipeline');
+      }
+
+      setDeploySuccess(true);
+    } catch (error) {
+      console.error(error);
+      alert('Failed to deploy pipeline. Check console for details.');
+    } finally {
+      setIsDeploying(false);
+    }
+  };
+
   return (
     <main className="flex h-screen w-full bg-slate-50 text-slate-900">
       {/* Left Pane: The Consultant (Chat) */}
@@ -260,8 +287,13 @@ export default function OnboardingWizard() {
             </Button>
           )}
           {currentStep === 'review' && (
-            <Button size="sm" className="bg-emerald-600 hover:bg-emerald-700 text-white">
-              Deploy Pipeline
+            <Button 
+              size="sm" 
+              className={deploySuccess ? "bg-blue-600 hover:bg-blue-700 text-white" : "bg-emerald-600 hover:bg-emerald-700 text-white"}
+              onClick={handleDeploy}
+              disabled={isDeploying || deploySuccess}
+            >
+              {isDeploying ? 'Deploying...' : deploySuccess ? 'Deployed Successfully!' : 'Deploy Pipeline'}
             </Button>
           )}
         </div>
