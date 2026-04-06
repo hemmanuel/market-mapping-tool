@@ -1,4 +1,4 @@
-export type OnboardingStep = 'niche' | 'schema' | 'sources' | 'review';
+export type OnboardingStep = 'niche' | 'entities' | 'relationships' | 'sources' | 'review';
 
 export interface Entity {
   name: string;

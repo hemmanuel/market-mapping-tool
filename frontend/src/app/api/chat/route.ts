@@ -23,31 +23,30 @@ export async function POST(req: Request) {
 
   switch (currentStep) {
     case 'niche':
-      systemPrompt = `You are an expert VC Market Intelligence Consultant. Your goal is to define the user's niche. If the user is vague (e.g., 'spacetech broadly'), you MUST ask pointed, multiple-choice style questions to narrow them down (e.g., 'Are we focusing on Launch Vehicles, Satellites, or Earth Observation?'). Gently reframe their answers until you have a concrete, specific niche. Once you do, call the \`lock_in_niche\` tool.`;
+      systemPrompt = `You are an expert VC Market Intelligence Consultant. Your goal is to define the user's niche. If the user is vague (e.g., 'spacetech broadly'), you MUST ask pointed, multiple-choice style questions to narrow them down (e.g., 'Are we focusing on Launch Vehicles, Satellites, or Earth Observation?'). Gently reframe their answers until you have a concrete, specific niche. Once you do, call the \`lock_in_niche\` tool to advance to the next step.`;
       
       tools = {
         lock_in_niche: tool({
-          description: 'Lock in the market niche and advance to schema generation.',
+          description: 'Lock in the market niche and advance to defining entities.',
           parameters: z.object({
             niche_name: z.string().describe('The name of the market niche (e.g., "Solid State Batteries")'),
           }),
           execute: async ({ niche_name }) => {
-            return { success: true, message: `Niche locked as "${niche_name}". The system will now generate a draft schema.` };
+            return { success: true, message: `Niche locked as "${niche_name}". The system will now advance to defining entities.` };
           }
         })
       };
       break;
 
-    case 'schema':
+    case 'entities':
       systemPrompt = `You are an expert VC/PE Market Intelligence Consultant. 
 The user has chosen the niche: "${currentConfig.niche}".
-We are currently defining the Graph Ontology (Entities and Relationships) for this niche.
-The user is viewing an interactive form of the schema.
-CURRENT SCHEMA STATE: ${JSON.stringify(currentConfig.schema)}
-You can help them by adding entities, removing entities, or adding relationships based on their requests.
-If they ask to add an entity, call \`add_entity\`. If they ask to remove one, call \`remove_entity\`. If they ask to add a relationship, call \`add_relationship\`.
-IMPORTANT: Do not add duplicate entities or relationships. Check the CURRENT SCHEMA STATE before adding. Once you have proposed a complete initial draft of the ontology, STOP calling tools and ask the user for their feedback.
-Do not discuss data sources yet.`;
+We are currently defining the Entities for the Graph Ontology.
+CURRENT ENTITIES: ${JSON.stringify(currentConfig.schema?.entities || [])}
+You can help them by adding or removing entities.
+If they ask to add an entity, call \`add_entity\`. If they ask to remove one, call \`remove_entity\`.
+IMPORTANT: Focus ONLY on entities right now. Do not discuss relationships or data sources.
+Once you have proposed a complete initial draft of the entities and the user agrees they look good, you MUST immediately call the \`finalize_entities\` tool to advance to the next step.`;
       
       tools = {
         add_entity: tool({
@@ -68,6 +67,27 @@ Do not discuss data sources yet.`;
             return { success: true, message: `Removed entity "${entity_name}".` };
           }
         }),
+        finalize_entities: tool({
+          description: 'Finalize the entities schema and advance to defining relationships.',
+          parameters: z.object({}),
+          execute: async () => {
+            return { success: true, message: `Entities finalized. The system will now advance to defining relationships.` };
+          }
+        })
+      };
+      break;
+
+    case 'relationships':
+      systemPrompt = `You are an expert VC/PE Market Intelligence Consultant. 
+The user has chosen the niche: "${currentConfig.niche}".
+We have defined these entities: ${JSON.stringify(currentConfig.schema?.entities || [])}
+We are currently defining the Relationships between these entities.
+CURRENT RELATIONSHIPS: ${JSON.stringify(currentConfig.schema?.relationships || [])}
+You can help them by adding relationships. Call \`add_relationship\`.
+IMPORTANT: Focus ONLY on relationships right now. Do not discuss data sources.
+Once you have proposed a complete initial draft of the relationships and the user agrees they look good, you MUST immediately call the \`finalize_relationships\` tool to advance to the next step.`;
+      
+      tools = {
         add_relationship: tool({
           description: 'Add a new relationship between two entities.',
           parameters: z.object({
@@ -78,6 +98,13 @@ Do not discuss data sources yet.`;
           execute: async ({ source, type, target }) => {
             return { success: true, message: `Added relationship: ${source} -[${type}]-> ${target}.` };
           }
+        }),
+        finalize_relationships: tool({
+          description: 'Finalize the relationships schema and advance to gathering data sources.',
+          parameters: z.object({}),
+          execute: async () => {
+            return { success: true, message: `Relationships finalized. The system will now advance to gathering data sources.` };
+          }
         })
       };
       break;
@@ -87,7 +114,8 @@ Do not discuss data sources yet.`;
 The user has chosen the niche: "${currentConfig.niche}".
 We are now gathering data sources (RSS feeds, APIs, websites) to ingest data from.
 Suggest relevant sources for this niche. If the user agrees or provides a URL, call \`add_source\`.
-If they want to remove a source, call \`remove_source\`.`;
+If they want to remove a source, call \`remove_source\`.
+Once you have gathered sufficient data sources and the user is ready to proceed, you MUST immediately call the \`finalize_sources\` tool to advance to the final review step.`;
       
       tools = {
         add_source: tool({
@@ -108,6 +136,13 @@ If they want to remove a source, call \`remove_source\`.`;
           }),
           execute: async ({ url }) => {
             return { success: true, message: `Removed source with URL "${url}".` };
+          }
+        }),
+        finalize_sources: tool({
+          description: 'Finalize the data sources and advance to the review step.',
+          parameters: z.object({}),
+          execute: async () => {
+            return { success: true, message: `Data sources finalized. The system will now advance to the review step.` };
           }
         })
       };

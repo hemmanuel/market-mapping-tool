@@ -6,17 +6,22 @@ from sqlalchemy.orm import selectinload
 from src.db.session import get_db_session
 from src.models.relational import Tenant, Site, DataSource
 from src.api.schemas import PipelineConfig
+from src.api.auth import get_current_tenant
 
 router = APIRouter()
 
 @router.post("/pipelines", status_code=201)
-async def create_pipeline(config: PipelineConfig, db: AsyncSession = Depends(get_db_session)):
-    # 1. Get or create a default Tenant
-    result = await db.execute(select(Tenant).limit(1))
+async def create_pipeline(
+    config: PipelineConfig, 
+    db: AsyncSession = Depends(get_db_session),
+    user_id: str = Depends(get_current_tenant)
+):
+    # 1. Get or create the Tenant for the authenticated user
+    result = await db.execute(select(Tenant).where(Tenant.auth_id == user_id))
     tenant = result.scalars().first()
     
     if not tenant:
-        tenant = Tenant(name="Default Tenant")
+        tenant = Tenant(name=f"Tenant for {user_id}", auth_id=user_id)
         db.add(tenant)
         await db.commit()
         await db.refresh(tenant)
