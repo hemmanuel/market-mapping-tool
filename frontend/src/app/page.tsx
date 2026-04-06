@@ -307,18 +307,20 @@ export default function OnboardingWizard() {
               <div className="space-y-6 max-w-2xl mx-auto">
                 
                 {/* Niche Card */}
-                <Card className={currentStep === 'niche' ? 'border-blue-400 shadow-sm' : 'opacity-70'}>
-                  <CardHeader className="pb-3">
-                    <CardTitle className="text-sm font-medium text-slate-500 uppercase tracking-wider">1. Market Niche</CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    {config.niche ? (
-                      <div className="text-xl font-semibold text-slate-900">{config.niche}</div>
-                    ) : (
-                      <div className="text-sm text-slate-400 italic">Chat with the consultant to define your niche...</div>
-                    )}
-                  </CardContent>
-                </Card>
+                {(currentStep === 'niche' || currentStep === 'entities' || currentStep === 'relationships' || currentStep === 'sources' || currentStep === 'review') && (
+                  <Card className={currentStep === 'niche' ? 'border-blue-400 shadow-sm' : 'opacity-70'}>
+                    <CardHeader className="pb-3">
+                      <CardTitle className="text-sm font-medium text-slate-500 uppercase tracking-wider">1. Market Niche</CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      {config.niche ? (
+                        <div className="text-xl font-semibold text-slate-900">{config.niche}</div>
+                      ) : (
+                        <div className="text-sm text-slate-400 italic">Chat with the consultant to define your niche...</div>
+                      )}
+                    </CardContent>
+                  </Card>
+                )}
 
                 {/* Entities Card */}
                 {(currentStep === 'entities' || currentStep === 'relationships' || currentStep === 'sources' || currentStep === 'review') && (
