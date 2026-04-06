@@ -195,7 +195,7 @@ export default function OnboardingWizard() {
       
       <div className="flex flex-1 overflow-hidden">
         {/* Left Pane: The Consultant (Chat) */}
-        <div className={`flex flex-col transition-all duration-500 ${isPaneVisible ? 'w-1/2 border-r border-slate-200' : 'w-full max-w-3xl mx-auto'} bg-white`}>
+        <div className={`flex flex-col min-h-0 transition-all duration-500 ${isPaneVisible ? 'w-1/2 border-r border-slate-200' : 'w-full max-w-3xl mx-auto'} bg-white`}>
           <div className="p-4 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
             <div className="flex items-center gap-2">
               <Bot className="w-5 h-5 text-blue-600" />

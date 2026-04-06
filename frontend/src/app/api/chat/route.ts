@@ -23,7 +23,10 @@ export async function POST(req: Request) {
 
   switch (currentStep) {
     case 'niche':
-      systemPrompt = `You are an expert VC Market Intelligence Consultant. Your goal is to define the user's niche. If the user is vague (e.g., 'spacetech broadly'), you MUST ask pointed, multiple-choice style questions to narrow them down (e.g., 'Are we focusing on Launch Vehicles, Satellites, or Earth Observation?'). Gently reframe their answers until you have a concrete, specific niche. Once you do, call the \`lock_in_niche\` tool to advance to the next step.`;
+      systemPrompt = `You are an expert VC Market Intelligence Consultant. Your goal is to define the user's niche. 
+      You may initially suggest narrowing down a broad topic (e.g., 'spacetech') to make it more actionable. 
+      HOWEVER, if the user insists on keeping it broad (e.g., "map the whole industry" or "the customer is always right"), you MUST accept their decision immediately without arguing. 
+      Once a niche (broad or narrow) is agreed upon, call the \`lock_in_niche\` tool to advance to the next step.`;
       
       tools = {
         lock_in_niche: tool({
