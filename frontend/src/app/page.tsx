@@ -6,9 +6,8 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
-import { Separator } from "@/components/ui/separator";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Send, Bot, User, Settings, ArrowRight, Plus, Trash2 } from "lucide-react";
+import { Send, Bot, User, Settings, Plus, Trash2 } from "lucide-react";
 import { OnboardingStep, PipelineConfig, DataSource } from "@/lib/types";
 import { Timeline } from "@/components/Timeline";
 
