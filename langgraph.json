@@ -1,0 +1,8 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "testing_agent": "./tests/agentic/runner.py:app"
+  },
+  "env": "frontend/.env.local",
+  "python_version": "3.12"
+}

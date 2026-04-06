@@ -66,17 +66,23 @@ export default function OnboardingWizard() {
             }));
             break;
           case 'add_relationship':
-            setConfig(prev => ({
-              ...prev,
-              schema: {
-                ...prev.schema!,
-                relationships: [...(prev.schema?.relationships || []), {
-                  source: args.source,
-                  type: args.type,
-                  target: args.target
-                }]
-              }
-            }));
+            setConfig(prev => {
+              const exists = prev.schema?.relationships.some(
+                r => r.source === args.source && r.type === args.type && r.target === args.target
+              );
+              if (exists) return prev;
+              return {
+                ...prev,
+                schema: {
+                  ...prev.schema!,
+                  relationships: [...(prev.schema?.relationships || []), {
+                    source: args.source,
+                    type: args.type,
+                    target: args.target
+                  }]
+                }
+              };
+            });
             break;
           case 'add_source':
             if (!config.sources.find(s => s.url === args.url)) {
