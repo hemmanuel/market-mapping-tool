@@ -1,0 +1,46 @@
+Target URL: https://market-mapping-tool.vercel.app/
+Target Niche: Spacetech
+----------------------------------------
+
+[*] Initializing browser and navigating to https://market-mapping-tool.vercel.app/
+[*] Browser initialized successfully.
+[*] Testing Niche Phase with LLM Simulated User
+[*] Simulated User: I would like to map the space thech space broadly from an early-stage vc
+[*] Consultant: Mapping the Space Tech ecosystem from an early-stage VC perspective is an exciting and massive undertaking. 
+
+Since "Space Tech" is quite broad, it would be helpful to know if you want to map the *entire* ecosystem or if you want to focus on specific segments. For example, we could look at:
+
+*   **Upstream:** Launch vehicles, satellite manufacturing, propulsion systems, and space infrastructure.
+*   **Downstream:** Earth observation (EO), satellite communications (SatCom), space data analytics, and GPS/navigation applications.
+*   **Emerging/Deep Tech:** In-space manufacturing, space debris mitigation, lunar economy, and asteroid mining.
+
+Would you like to map the entire broad Space Tech ecosystem, or are there specific sub-sectors (like upstream infrastructure or downstream data applications) that you are most interested in targeting?
+[*] Simulated User: I really like that breakdown—upstream, downstream, and emerging deep tech. Honestly, right now, we need to see the whole board. As an early-stage fund, our thesis is still crystallizing, so I don't want to artificially constrain our potential deal flow by picking just one of those buckets right out of the gate. 
+
+We're looking for the macro view of the entire ecosystem. I guess what I really want to see is how everything connects to each other. Like, who are the promising Seed and Series A startups operating across all those segments? And then, how do they fit into the broader food chain? 
+
+It would be great to see the startups linked to the big primes and incumbents (your SpaceXs, Lockheeds, etc.), the other active VC funds doing the heavy lifting in this space, and maybe the major government agencies, DoD branches, or universities that are acting as customers or spinning out the IP. 
+
+Does that make sense? I basically want a giant landscape map of all these players so we can step back, look at the flow of capital and tech, and start spotting the white space where we should be writing checks.
+[*] ✅ Success! Consultant locked the niche after 2 turns.
+[*] Testing Schema Phase...
+[*] Requested schema generation. Waiting for entities to populate...
+[*] Simulating manual entity addition: 'University'
+[*] Manual entity addition verified.
+[*] Clicking 'Next Step' to transition to Sources Phase...
+[*] Schema Phase passed successfully.
+[*] Testing Sources Phase...
+[*] Adding a manual data source...
+[*] Sources Phase failed: Locator.click: Element is outside of the viewport
+Call log:
+  - waiting for locator("form").nth(1).locator("button[type=\"submit\"]")
+    - locator resolved to <button tabindex="0" type="submit" data-slot="button" class="group/button inline-flex shrink-0 items-center justify-center border border-transparent bg-clip-padding font-medium whitespace-nowrap transition-all outline-none select-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 active:not-aria-[haspopup]:translate-y-px disabled:pointer-events-none disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-3 aria-invalid:ring-destructive/20 dark:aria-invalid:bor…>…</button>
+  - attempting click action
+    - scrolling into view if needed
+    - done scrolling
+
+[*] Tearing down browser...
+[*] Final Status: FAIL
+
+----------------------------------------
+❌ TESTS FAILED
