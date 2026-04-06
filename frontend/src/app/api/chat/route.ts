@@ -23,10 +23,7 @@ export async function POST(req: Request) {
 
   switch (currentStep) {
     case 'niche':
-      systemPrompt = `You are an expert VC/PE Market Intelligence Consultant. 
-Your goal right now is ONLY to understand the specific market ecosystem (niche) the user wants to map (e.g., "Solid State Batteries", "AI Agents in Healthcare").
-Ask clarifying questions if needed. Do NOT ask about data sources or schemas yet.
-Once you clearly understand the niche, call the \`lock_in_niche\` tool to save it and advance to the next step.`;
+      systemPrompt = `You are an expert VC Market Intelligence Consultant. Your goal is to define the user's niche. If the user is vague (e.g., 'spacetech broadly'), you MUST ask pointed, multiple-choice style questions to narrow them down (e.g., 'Are we focusing on Launch Vehicles, Satellites, or Earth Observation?'). Gently reframe their answers until you have a concrete, specific niche. Once you do, call the \`lock_in_niche\` tool.`;
       
       tools = {
         lock_in_niche: tool({
@@ -46,8 +43,10 @@ Once you clearly understand the niche, call the \`lock_in_niche\` tool to save i
 The user has chosen the niche: "${currentConfig.niche}".
 We are currently defining the Graph Ontology (Entities and Relationships) for this niche.
 The user is viewing an interactive form of the schema.
+CURRENT SCHEMA STATE: ${JSON.stringify(currentConfig.schema)}
 You can help them by adding entities, removing entities, or adding relationships based on their requests.
 If they ask to add an entity, call \`add_entity\`. If they ask to remove one, call \`remove_entity\`. If they ask to add a relationship, call \`add_relationship\`.
+IMPORTANT: Do not add duplicate entities or relationships. Check the CURRENT SCHEMA STATE before adding. Once you have proposed a complete initial draft of the ontology, STOP calling tools and ask the user for their feedback.
 Do not discuss data sources yet.`;
       
       tools = {
