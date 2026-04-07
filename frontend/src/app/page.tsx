@@ -5,7 +5,6 @@ import { useState, useEffect, useRef } from "react";
 import ReactMarkdown from "react-markdown";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 import { Send, Bot, User, Settings, Plus, Trash2, Target, Database, Network, Link, CheckCircle2 } from "lucide-react";
 import { OnboardingStep, PipelineConfig, DataSource } from "@/lib/types";
@@ -24,7 +23,7 @@ export default function OnboardingWizard() {
   const [deploySuccess, setDeploySuccess] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  const { messages, input, handleInputChange, handleSubmit, isLoading, setMessages, append } = useChat({
+  const { messages, input, handleInputChange, handleSubmit, isLoading, append } = useChat({
     api: "/api/chat",
     body: {
       currentStep,
@@ -109,7 +108,7 @@ export default function OnboardingWizard() {
         }
       });
     }
-  }, [messages, config.niche, config.schema, config.sources]);
+  }, [messages, config.niche, config.schema, config.sources, append, currentStep]);
 
   // Update config.currentStep when currentStep changes
   useEffect(() => {
