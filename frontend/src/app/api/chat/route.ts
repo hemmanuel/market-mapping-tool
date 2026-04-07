@@ -46,35 +46,22 @@ export async function POST(req: Request) {
 The user has chosen the niche: "${currentConfig.niche}".
 We are currently defining the Entities for the Graph Ontology.
 CURRENT ENTITIES: ${JSON.stringify(currentConfig.schema?.entities || [])}
-You can help them by adding or removing entities.
-If they ask to add an entity, call \`add_entity\`. If they ask to remove one, call \`remove_entity\`.
-IMPORTANT: Focus ONLY on entities right now. Do not discuss relationships or data sources.
-Once you have proposed a complete initial draft of the entities and the user agrees they look good, you MUST immediately call the \`finalize_entities\` tool to advance to the next step.`;
+
+Your job is to proactively help the user define entities.
+Always respond to the user with a conversational text message.
+In the same turn, ALWAYS call the \`sync_entities_state\` tool to reflect the complete, current list of entities.
+If you are still brainstorming or adding entities, set \`is_finished: false\`.
+ONLY when the user explicitly agrees the list is complete (e.g., "looks good", "we are done", "move on"), set \`is_finished: true\`.`;
       
       tools = {
-        add_entity: tool({
-          description: 'Add a new entity type to the schema.',
+        sync_entities_state: tool({
+          description: 'Sync the complete list of entities and indicate if the user is finished.',
           parameters: z.object({
-            entity_name: z.string().describe('The name of the entity to add (e.g., "Company", "Patent")'),
+            entities: z.array(z.string()).describe('The complete, current list of entities (e.g., ["Company", "Founder"])'),
+            is_finished: z.boolean().describe('True ONLY if the user explicitly agreed the list is complete and wants to move on.')
           }),
-          execute: async ({ entity_name }) => {
-            return { success: true, message: `Added entity "${entity_name}".` };
-          }
-        }),
-        remove_entity: tool({
-          description: 'Remove an entity type from the schema.',
-          parameters: z.object({
-            entity_name: z.string().describe('The name of the entity to remove'),
-          }),
-          execute: async ({ entity_name }) => {
-            return { success: true, message: `Removed entity "${entity_name}".` };
-          }
-        }),
-        finalize_entities: tool({
-          description: 'Finalize the entities schema and advance to defining relationships.',
-          parameters: z.object({}),
-          execute: async () => {
-            return { success: true, message: `Entities finalized. The system will now advance to defining relationships.` };
+          execute: async ({ entities, is_finished }) => {
+            return { success: true, message: `Synced ${entities.length} entities. Finished: ${is_finished}` };
           }
         })
       };
@@ -86,27 +73,26 @@ The user has chosen the niche: "${currentConfig.niche}".
 We have defined these entities: ${JSON.stringify(currentConfig.schema?.entities || [])}
 We are currently defining the Relationships between these entities.
 CURRENT RELATIONSHIPS: ${JSON.stringify(currentConfig.schema?.relationships || [])}
-You can help them by adding relationships. Call \`add_relationship\`.
-IMPORTANT: Focus ONLY on relationships right now. Do not discuss data sources.
-Once you have proposed a complete initial draft of the relationships and the user agrees they look good, you MUST immediately call the \`finalize_relationships\` tool to advance to the next step.`;
+
+Your job is to proactively help the user define relationships.
+Always respond to the user with a conversational text message.
+In the same turn, ALWAYS call the \`sync_relationships_state\` tool to reflect the complete, current list of relationships.
+If you are still brainstorming or adding relationships, set \`is_finished: false\`.
+ONLY when the user explicitly agrees the list is complete (e.g., "looks good", "we are done", "move on"), set \`is_finished: true\`.`;
       
       tools = {
-        add_relationship: tool({
-          description: 'Add a new relationship between two entities.',
+        sync_relationships_state: tool({
+          description: 'Sync the complete list of relationships and indicate if the user is finished.',
           parameters: z.object({
-            source: z.string().describe('The source entity type'),
-            type: z.string().describe('The relationship type (e.g., "DEVELOPS")'),
-            target: z.string().describe('The target entity type')
+            relationships: z.array(z.object({
+              source: z.string().describe('The source entity type'),
+              type: z.string().describe('The relationship type (e.g., "DEVELOPS")'),
+              target: z.string().describe('The target entity type')
+            })).describe('The complete, current list of relationships'),
+            is_finished: z.boolean().describe('True ONLY if the user explicitly agreed the list is complete and wants to move on.')
           }),
-          execute: async ({ source, type, target }) => {
-            return { success: true, message: `Added relationship: ${source} -[${type}]-> ${target}.` };
-          }
-        }),
-        finalize_relationships: tool({
-          description: 'Finalize the relationships schema and advance to gathering data sources.',
-          parameters: z.object({}),
-          execute: async () => {
-            return { success: true, message: `Relationships finalized. The system will now advance to gathering data sources.` };
+          execute: async ({ relationships, is_finished }) => {
+            return { success: true, message: `Synced ${relationships.length} relationships. Finished: ${is_finished}` };
           }
         })
       };
@@ -116,36 +102,26 @@ Once you have proposed a complete initial draft of the relationships and the use
       systemPrompt = `You are an expert VC/PE Market Intelligence Consultant. 
 The user has chosen the niche: "${currentConfig.niche}".
 We are now gathering data sources (RSS feeds, APIs, websites) to ingest data from.
-Suggest relevant sources for this niche. If the user agrees or provides a URL, call \`add_source\`.
-If they want to remove a source, call \`remove_source\`.
-Once you have gathered sufficient data sources and the user is ready to proceed, you MUST immediately call the \`finalize_sources\` tool to advance to the final review step.`;
+
+Your job is to proactively help the user define data sources.
+Always respond to the user with a conversational text message.
+In the same turn, ALWAYS call the \`sync_sources_state\` tool to reflect the complete, current list of data sources.
+If you are still brainstorming or adding sources, set \`is_finished: false\`.
+ONLY when the user explicitly agrees the list is complete (e.g., "looks good", "we are done", "move on"), set \`is_finished: true\`.`;
       
       tools = {
-        add_source: tool({
-          description: 'Add a new data source to the pipeline.',
+        sync_sources_state: tool({
+          description: 'Sync the complete list of data sources and indicate if the user is finished.',
           parameters: z.object({
-            type: z.enum(['rss', 'api', 'webhook', 'custom']).describe('The type of data source'),
-            url: z.string().describe('The URL or endpoint for the data source'),
-            name: z.string().describe('A human-readable name for the source')
+            sources: z.array(z.object({
+              type: z.enum(['rss', 'api', 'webhook', 'custom']).describe('The type of data source'),
+              url: z.string().describe('The URL or endpoint for the data source'),
+              name: z.string().describe('A human-readable name for the source')
+            })).describe('The complete, current list of sources'),
+            is_finished: z.boolean().describe('True ONLY if the user explicitly agreed the list is complete and wants to move on.')
           }),
-          execute: async ({ type, url, name }) => {
-            return { success: true, message: `Added ${type} source "${name}" (${url}).` };
-          }
-        }),
-        remove_source: tool({
-          description: 'Remove a data source from the pipeline.',
-          parameters: z.object({
-            url: z.string().describe('The URL of the source to remove'),
-          }),
-          execute: async ({ url }) => {
-            return { success: true, message: `Removed source with URL "${url}".` };
-          }
-        }),
-        finalize_sources: tool({
-          description: 'Finalize the data sources and advance to the review step.',
-          parameters: z.object({}),
-          execute: async () => {
-            return { success: true, message: `Data sources finalized. The system will now advance to the review step.` };
+          execute: async ({ sources, is_finished }) => {
+            return { success: true, message: `Synced ${sources.length} sources. Finished: ${is_finished}` };
           }
         })
       };
@@ -163,6 +139,7 @@ Answer any final questions they have before they deploy.`;
     system: systemPrompt,
     messages,
     tools,
+    maxSteps: 5, // Allow the model to call tools and respond with text in the same turn
   });
 
   return result.toDataStreamResponse();

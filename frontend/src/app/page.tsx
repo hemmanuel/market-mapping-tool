@@ -1,13 +1,13 @@
 "use client";
 
 import { useChat } from "ai/react";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
+import ReactMarkdown from "react-markdown";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Send, Bot, User, Settings, Plus, Trash2 } from "lucide-react";
+import { Send, Bot, User, Settings, Plus, Trash2, Target, Database, Network, Link, CheckCircle2 } from "lucide-react";
 import { OnboardingStep, PipelineConfig, DataSource } from "@/lib/types";
 import { Timeline } from "@/components/Timeline";
 
@@ -22,8 +22,9 @@ export default function OnboardingWizard() {
 
   const [isDeploying, setIsDeploying] = useState(false);
   const [deploySuccess, setDeploySuccess] = useState(false);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  const { messages, input, handleInputChange, handleSubmit, isLoading } = useChat({
+  const { messages, input, handleInputChange, handleSubmit, isLoading, setMessages, append } = useChat({
     api: "/api/chat",
     body: {
       currentStep,
@@ -46,73 +47,64 @@ export default function OnboardingWizard() {
             if (config.niche !== args.niche_name) {
               setConfig(prev => ({ ...prev, niche: args.niche_name }));
               setCurrentStep('entities');
+              setTimeout(() => {
+                append({
+                  role: 'user',
+                  content: `SYSTEM_AUTO_PROMPT: We are now in the Entities step. Please explain what entities are in this context, deduce the core entities we should track for the "${args.niche_name}" market, add them to the schema using the tool, and ask me if I want to add more or remove any.`
+                });
+              }, 500);
             }
             break;
-          case 'add_entity':
-            if (!config.schema?.entities.includes(args.entity_name)) {
-              setConfig(prev => ({
-                ...prev,
-                schema: {
-                  ...prev.schema!,
-                  entities: [...(prev.schema?.entities || []), args.entity_name]
-                }
-              }));
-            }
-            break;
-          case 'remove_entity':
+          case 'sync_entities_state':
             setConfig(prev => ({
               ...prev,
               schema: {
                 ...prev.schema!,
-                entities: prev.schema?.entities.filter(e => e !== args.entity_name) || []
+                entities: args.entities
               }
             }));
-            break;
-          case 'finalize_entities':
-            setCurrentStep('relationships');
-            break;
-          case 'add_relationship':
-            setConfig(prev => {
-              const exists = prev.schema?.relationships.some(
-                r => r.source === args.source && r.type === args.type && r.target === args.target
-              );
-              if (exists) return prev;
-              return {
-                ...prev,
-                schema: {
-                  ...prev.schema!,
-                  relationships: [...(prev.schema?.relationships || []), {
-                    source: args.source,
-                    type: args.type,
-                    target: args.target
-                  }]
-                }
-              };
-            });
-            break;
-          case 'finalize_relationships':
-            setCurrentStep('sources');
-            break;
-          case 'add_source':
-            if (!config.sources.find(s => s.url === args.url)) {
-              setConfig(prev => ({
-                ...prev,
-                sources: [...prev.sources, {
-                  type: args.type,
-                  url: args.url,
-                  name: args.name
-                }]
-              }));
+            if (args.is_finished && currentStep !== 'relationships') {
+              setCurrentStep('relationships');
+              setTimeout(() => {
+                append({
+                  role: 'user',
+                  content: `SYSTEM_AUTO_PROMPT: We are now in the Relationships step. Please briefly explain to me what relationships mean in this context (e.g., "Company -[RAISED]-> Funding Round"), deduce the basic logical relationships between our defined entities, add them to the schema using the tool, and ask me if I want to add more or remove any.`
+                });
+              }, 500);
             }
             break;
-          case 'remove_source':
+          case 'sync_relationships_state':
             setConfig(prev => ({
               ...prev,
-              sources: prev.sources.filter(s => s.url !== args.url)
+              schema: {
+                ...prev.schema!,
+                relationships: args.relationships
+              }
             }));
+            if (args.is_finished && currentStep !== 'sources') {
+              setCurrentStep('sources');
+              setTimeout(() => {
+                append({
+                  role: 'user',
+                  content: `SYSTEM_AUTO_PROMPT: We are now in the Data Sources step. Please briefly explain what data sources are (e.g., RSS feeds, APIs, websites), suggest some relevant sources for our niche, add them to the schema using the tool, and ask me if I want to add more or remove any.`
+                });
+              }, 500);
+            }
             break;
-          case 'finalize_sources':
-            setCurrentStep('review');
+          case 'sync_sources_state':
+            setConfig(prev => ({
+              ...prev,
+              sources: args.sources
+            }));
+            if (args.is_finished && currentStep !== 'review') {
+              setCurrentStep('review');
+              setTimeout(() => {
+                append({
+                  role: 'user',
+                  content: `SYSTEM_AUTO_PROMPT: We are now in the Review step. Please congratulate me on finishing the configuration, summarize the pipeline we just built, and tell me to click the Deploy Pipeline button in the right pane when I'm ready.`
+                });
+              }, 500);
+            }
             break;
         }
       });
@@ -123,6 +115,11 @@ export default function OnboardingWizard() {
   useEffect(() => {
     setConfig(prev => ({ ...prev, currentStep }));
   }, [currentStep]);
+
+  // Auto-scroll to bottom of chat
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
 
   // Handlers for manual form edits
   const handleAddEntity = (e: React.FormEvent<HTMLFormElement>) => {
@@ -199,59 +196,61 @@ export default function OnboardingWizard() {
           <div className="p-4 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
             <div className="flex items-center gap-2">
               <Bot className="w-5 h-5 text-blue-600" />
-              <h1 className="font-semibold text-lg">The Consultant</h1>
+              <h1 className="font-semibold text-lg">Market Map Creator</h1>
             </div>
             <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200">
               Phase: {currentStep.toUpperCase()}
             </Badge>
           </div>
           
-          <ScrollArea className="flex-1 p-4">
+          <div className="flex-1 overflow-y-auto p-4">
             <div className="flex flex-col gap-4">
               {messages.length === 0 && (
                 <div className="text-center text-slate-500 mt-10">
-                  <p>Hello! I am your Market Intelligence Consultant.</p>
+                  <p>Hello! I am your Market Map Creator.</p>
                   <p className="text-sm mt-2">Let&apos;s start by defining the specific market ecosystem you want to map.</p>
                 </div>
               )}
               
-              {messages.map((m) => (
-                <div
-                  key={m.id}
-                  className={`flex gap-3 ${m.role === "user" ? "justify-end" : "justify-start"}`}
-                >
-                  {m.role === "assistant" && (
-                    <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center shrink-0">
-                      <Bot className="w-4 h-4 text-blue-600" />
-                    </div>
-                  )}
-                  
+              {messages.map((m) => {
+                if (m.role === "assistant" && !m.content) return null;
+                if (m.role === "user" && m.content.startsWith("SYSTEM_AUTO_PROMPT:")) return null;
+                
+                return (
                   <div
-                    className={`max-w-[80%] rounded-lg p-3 ${
-                      m.role === "user"
-                        ? "bg-blue-600 text-white rounded-tr-none"
-                        : "bg-slate-100 text-slate-800 rounded-tl-none"
-                    }`}
+                    key={m.id}
+                    className={`flex gap-3 ${m.role === "user" ? "justify-end" : "justify-start"}`}
                   >
-                    {m.content && <p className="whitespace-pre-wrap text-sm">{m.content}</p>}
+                    {m.role === "assistant" && (
+                      <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center shrink-0">
+                        <Bot className="w-4 h-4 text-blue-600" />
+                      </div>
+                    )}
                     
-                    {m.toolInvocations?.map((toolInvocation) => {
-                      return (
-                        <div key={toolInvocation.toolCallId} className="mt-2 p-2 bg-slate-200 rounded border border-slate-300 text-xs text-slate-600 flex items-center gap-2">
-                          <Settings className="w-3 h-3" />
-                          <span className="font-mono">{toolInvocation.toolName}</span>
+                    <div
+                      className={`max-w-[80%] rounded-lg p-3 ${
+                        m.role === "user"
+                          ? "bg-blue-600 text-white rounded-tr-none"
+                          : "bg-slate-100 text-slate-800 rounded-tl-none"
+                      }`}
+                    >
+                      {m.content && (
+                        <div className={`prose prose-sm max-w-none ${m.role === "user" ? "text-white prose-p:text-white prose-strong:text-white" : "prose-slate"}`}>
+                          <ReactMarkdown>
+                            {m.content}
+                          </ReactMarkdown>
                         </div>
-                      );
-                    })}
-                  </div>
-                  
-                  {m.role === "user" && (
-                    <div className="w-8 h-8 rounded-full bg-slate-200 flex items-center justify-center shrink-0">
-                      <User className="w-4 h-4 text-slate-600" />
+                      )}
                     </div>
-                  )}
-                </div>
-              ))}
+                    
+                    {m.role === "user" && (
+                      <div className="w-8 h-8 rounded-full bg-slate-200 flex items-center justify-center shrink-0">
+                        <User className="w-4 h-4 text-slate-600" />
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
               {isLoading && (
                 <div className="flex gap-3 justify-start">
                   <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center shrink-0">
@@ -264,15 +263,16 @@ export default function OnboardingWizard() {
                   </div>
                 </div>
               )}
+              <div ref={messagesEndRef} />
             </div>
-          </ScrollArea>
+          </div>
 
           <div className="p-4 border-t border-slate-200 bg-white">
             <form onSubmit={handleSubmit} className="flex gap-2">
               <Input
                 value={input}
                 onChange={handleInputChange}
-                placeholder="Chat with the consultant..."
+                placeholder="Chat with the creator..."
                 className="flex-1"
                 disabled={isLoading}
               />
@@ -285,11 +285,11 @@ export default function OnboardingWizard() {
 
         {/* Right Pane: The Factory (Interactive Forms) */}
         {isPaneVisible && (
-          <div className="flex flex-col w-1/2 bg-slate-50 border-l border-slate-200 animate-in slide-in-from-right-1/2 duration-500">
+          <div className="flex flex-col w-1/2 min-h-0 bg-slate-50 border-l border-slate-200 animate-in slide-in-from-right-1/2 duration-500">
             <div className="p-4 border-b border-slate-200 bg-white flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <Settings className="w-5 h-5 text-emerald-600" />
-                <h2 className="font-semibold text-lg">The Factory</h2>
+                <h2 className="font-semibold text-lg">Define Market</h2>
               </div>
               {currentStep === 'review' && (
                 <Button 
@@ -303,31 +303,35 @@ export default function OnboardingWizard() {
               )}
             </div>
             
-            <ScrollArea className="flex-1 p-6">
-              <div className="space-y-6 max-w-2xl mx-auto">
+            <div className="flex-1 overflow-y-auto p-6">
+              <div className="space-y-6 max-w-2xl mx-auto relative before:absolute before:inset-0 before:ml-5 before:-translate-x-px md:before:mx-auto md:before:translate-x-0 before:h-full before:w-0.5 before:bg-gradient-to-b before:from-transparent before:via-slate-200 before:to-transparent">
                 
-                {/* Niche Card */}
-                <Card className="opacity-70">
-                  <CardHeader className="pb-3">
-                    <CardTitle className="text-sm font-medium text-slate-500 uppercase tracking-wider">1. Market Niche</CardTitle>
-                  </CardHeader>
-                  <CardContent>
+                {/* Step 1: Niche */}
+                <div className="relative flex items-start gap-4 opacity-100">
+                  <div className={`z-10 flex items-center justify-center w-10 h-10 rounded-full border-2 bg-white ${config.niche ? 'border-emerald-500 text-emerald-500' : 'border-blue-600 text-blue-600'}`}>
+                    {config.niche ? <CheckCircle2 className="w-5 h-5" /> : <Target className="w-5 h-5" />}
+                  </div>
+                  <div className="flex-1 pt-1.5 pb-6">
+                    <h3 className="text-base font-semibold text-slate-900">Market Niche</h3>
                     {config.niche ? (
-                      <div className="text-xl font-semibold text-slate-900">{config.niche}</div>
+                      <div className="mt-2 p-3 bg-emerald-50 border border-emerald-100 rounded-md text-emerald-800 font-medium">
+                        {config.niche}
+                      </div>
                     ) : (
-                      <div className="text-sm text-slate-400 italic">Chat with the consultant to define your niche...</div>
+                      <p className="text-sm text-slate-500 mt-1">Chat with the creator to define your focus area.</p>
                     )}
-                  </CardContent>
-                </Card>
+                  </div>
+                </div>
 
-                {/* Entities Card */}
-                {(currentStep === 'entities' || currentStep === 'relationships' || currentStep === 'sources' || currentStep === 'review') && (
-                  <Card className={currentStep === 'entities' ? 'border-blue-400 shadow-sm' : 'opacity-70'}>
-                    <CardHeader className="pb-3 flex flex-row items-center justify-between">
-                      <CardTitle className="text-sm font-medium text-slate-500 uppercase tracking-wider">2. Entities</CardTitle>
-                    </CardHeader>
-                    <CardContent className="space-y-4">
-                      <div>
+                {/* Step 2: Entities */}
+                <div className={`relative flex items-start gap-4 ${(currentStep === 'entities' || currentStep === 'relationships' || currentStep === 'sources' || currentStep === 'review') ? 'opacity-100' : 'opacity-50'}`}>
+                  <div className={`z-10 flex items-center justify-center w-10 h-10 rounded-full border-2 bg-white ${(currentStep === 'relationships' || currentStep === 'sources' || currentStep === 'review') ? 'border-emerald-500 text-emerald-500' : currentStep === 'entities' ? 'border-blue-600 text-blue-600' : 'border-slate-300 text-slate-400'}`}>
+                    {(currentStep === 'relationships' || currentStep === 'sources' || currentStep === 'review') ? <CheckCircle2 className="w-5 h-5" /> : <Database className="w-5 h-5" />}
+                  </div>
+                  <div className="flex-1 pt-1.5 pb-6">
+                    <h3 className="text-base font-semibold text-slate-900">Entities</h3>
+                    {(currentStep === 'entities' || currentStep === 'relationships' || currentStep === 'sources' || currentStep === 'review') ? (
+                      <div className="mt-2 p-4 bg-white border border-slate-200 rounded-md shadow-sm">
                         <div className="flex flex-wrap gap-2 mb-3">
                           {config.schema?.entities.map(entity => (
                             <Badge key={entity} variant="secondary" className="px-2 py-1 flex items-center gap-1">
@@ -348,21 +352,24 @@ export default function OnboardingWizard() {
                           </form>
                         )}
                       </div>
-                    </CardContent>
-                  </Card>
-                )}
+                    ) : (
+                      <p className="text-sm text-slate-500 mt-1">Define the key entities to track.</p>
+                    )}
+                  </div>
+                </div>
 
-                {/* Relationships Card */}
-                {(currentStep === 'relationships' || currentStep === 'sources' || currentStep === 'review') && (
-                  <Card className={currentStep === 'relationships' ? 'border-blue-400 shadow-sm' : 'opacity-70'}>
-                    <CardHeader className="pb-3 flex flex-row items-center justify-between">
-                      <CardTitle className="text-sm font-medium text-slate-500 uppercase tracking-wider">3. Relationships</CardTitle>
-                    </CardHeader>
-                    <CardContent className="space-y-4">
-                      <div>
-                        <div className="space-y-2 mb-3">
+                {/* Step 3: Relationships */}
+                <div className={`relative flex items-start gap-4 ${(currentStep === 'relationships' || currentStep === 'sources' || currentStep === 'review') ? 'opacity-100' : 'opacity-50'}`}>
+                  <div className={`z-10 flex items-center justify-center w-10 h-10 rounded-full border-2 bg-white ${(currentStep === 'sources' || currentStep === 'review') ? 'border-emerald-500 text-emerald-500' : currentStep === 'relationships' ? 'border-blue-600 text-blue-600' : 'border-slate-300 text-slate-400'}`}>
+                    {(currentStep === 'sources' || currentStep === 'review') ? <CheckCircle2 className="w-5 h-5" /> : <Network className="w-5 h-5" />}
+                  </div>
+                  <div className="flex-1 pt-1.5 pb-6">
+                    <h3 className="text-base font-semibold text-slate-900">Relationships</h3>
+                    {(currentStep === 'relationships' || currentStep === 'sources' || currentStep === 'review') ? (
+                      <div className="mt-2 p-4 bg-white border border-slate-200 rounded-md shadow-sm">
+                        <div className="space-y-2">
                           {config.schema?.relationships.map((rel, idx) => (
-                            <div key={idx} className="flex items-center gap-2 text-sm bg-slate-100 p-2 rounded border border-slate-200">
+                            <div key={idx} className="flex items-center gap-2 text-sm bg-slate-50 p-2 rounded border border-slate-100">
                               <Badge variant="outline" className="bg-white">{rel.source}</Badge>
                               <span className="text-slate-400 font-mono text-xs">-[{rel.type}]-&gt;</span>
                               <Badge variant="outline" className="bg-white">{rel.target}</Badge>
@@ -371,59 +378,66 @@ export default function OnboardingWizard() {
                           {config.schema?.relationships.length === 0 && <span className="text-sm text-slate-400 italic">No relationships defined.</span>}
                         </div>
                       </div>
-                    </CardContent>
-                  </Card>
-                )}
+                    ) : (
+                      <p className="text-sm text-slate-500 mt-1">Map how entities connect to each other.</p>
+                    )}
+                  </div>
+                </div>
 
-                {/* Sources Card */}
-                {(currentStep === 'sources' || currentStep === 'review') && (
-                  <Card className={currentStep === 'sources' ? 'border-blue-400 shadow-sm' : 'opacity-70'}>
-                    <CardHeader className="pb-3">
-                      <CardTitle className="text-sm font-medium text-slate-500 uppercase tracking-wider">4. Data Sources</CardTitle>
-                    </CardHeader>
-                    <CardContent className="space-y-4">
-                      <div className="space-y-2">
-                        {config.sources.map((source, idx) => (
-                          <div key={idx} className="flex items-center justify-between bg-slate-100 p-3 rounded border border-slate-200">
-                            <div>
-                              <div className="font-medium text-sm flex items-center gap-2">
-                                {source.name} <Badge variant="outline" className="text-[10px] h-5">{source.type}</Badge>
+                {/* Step 4: Data Sources */}
+                <div className={`relative flex items-start gap-4 ${(currentStep === 'sources' || currentStep === 'review') ? 'opacity-100' : 'opacity-50'}`}>
+                  <div className={`z-10 flex items-center justify-center w-10 h-10 rounded-full border-2 bg-white ${currentStep === 'review' ? 'border-emerald-500 text-emerald-500' : currentStep === 'sources' ? 'border-blue-600 text-blue-600' : 'border-slate-300 text-slate-400'}`}>
+                    {currentStep === 'review' ? <CheckCircle2 className="w-5 h-5" /> : <Link className="w-5 h-5" />}
+                  </div>
+                  <div className="flex-1 pt-1.5 pb-6">
+                    <h3 className="text-base font-semibold text-slate-900">Data Sources</h3>
+                    {(currentStep === 'sources' || currentStep === 'review') ? (
+                      <div className="mt-2 p-4 bg-white border border-slate-200 rounded-md shadow-sm">
+                        <div className="space-y-2">
+                          {config.sources.map((source, idx) => (
+                            <div key={idx} className="flex items-center justify-between bg-slate-50 p-3 rounded border border-slate-100">
+                              <div>
+                                <div className="font-medium text-sm flex items-center gap-2">
+                                  {source.name} <Badge variant="outline" className="text-[10px] h-5">{source.type}</Badge>
+                                </div>
+                                <div className="text-xs text-slate-500 font-mono mt-1 truncate max-w-sm">{source.url}</div>
                               </div>
-                              <div className="text-xs text-slate-500 font-mono mt-1 truncate max-w-sm">{source.url}</div>
+                              {currentStep === 'sources' && (
+                                <Button size="icon" variant="ghost" className="h-8 w-8 text-slate-400 hover:text-red-500" onClick={() => setConfig(prev => ({...prev, sources: prev.sources.filter(s => s.url !== source.url)}))}>
+                                  <Trash2 className="w-4 h-4" />
+                                </Button>
+                              )}
                             </div>
-                            {currentStep === 'sources' && (
-                              <Button size="icon" variant="ghost" className="h-8 w-8 text-slate-400 hover:text-red-500" onClick={() => setConfig(prev => ({...prev, sources: prev.sources.filter(s => s.url !== source.url)}))}>
-                                <Trash2 className="w-4 h-4" />
-                              </Button>
-                            )}
-                          </div>
-                        ))}
-                        {config.sources.length === 0 && <div className="text-sm text-slate-400 italic p-4 text-center border border-dashed rounded">No data sources added yet.</div>}
+                          ))}
+                          {config.sources.length === 0 && <div className="text-sm text-slate-400 italic p-4 text-center border border-dashed rounded">No data sources added yet.</div>}
+                        </div>
+                        
+                        {currentStep === 'sources' && (
+                          <form onSubmit={handleAddSource} className="flex flex-col gap-2 pt-4 mt-4 border-t border-slate-100">
+                            <div className="flex gap-2">
+                              <Input name="sourceName" placeholder="Source Name" className="text-sm flex-1" required />
+                              <select name="sourceType" className="flex h-10 w-32 items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50">
+                                <option value="rss">RSS</option>
+                                <option value="api">API</option>
+                                <option value="webhook">Webhook</option>
+                                <option value="custom">Custom</option>
+                              </select>
+                            </div>
+                            <div className="flex gap-2">
+                              <Input name="sourceUrl" placeholder="URL (e.g., https://...)" className="text-sm flex-1" required />
+                              <Button type="submit" size="sm" variant="secondary"><Plus className="w-4 h-4 mr-1" /> Add</Button>
+                            </div>
+                          </form>
+                        )}
                       </div>
-                      
-                      {currentStep === 'sources' && (
-                        <form onSubmit={handleAddSource} className="flex flex-col gap-2 pt-2 border-t border-slate-100">
-                          <div className="flex gap-2">
-                            <Input name="sourceName" placeholder="Source Name" className="text-sm flex-1" required />
-                            <select name="sourceType" className="flex h-10 w-32 items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50">
-                              <option value="rss">RSS</option>
-                              <option value="api">API</option>
-                              <option value="webhook">Webhook</option>
-                              <option value="custom">Custom</option>
-                            </select>
-                          </div>
-                          <div className="flex gap-2">
-                            <Input name="sourceUrl" placeholder="URL (e.g., https://...)" className="text-sm flex-1" required />
-                            <Button type="submit" size="sm" variant="secondary"><Plus className="w-4 h-4 mr-1" /> Add</Button>
-                          </div>
-                        </form>
-                      )}
-                    </CardContent>
-                  </Card>
-                )}
-                
+                    ) : (
+                      <p className="text-sm text-slate-500 mt-1">Connect external data feeds.</p>
+                    )}
+                  </div>
+                </div>
+
               </div>
-            </ScrollArea>
+            </div>
           </div>
         )}
       </div>

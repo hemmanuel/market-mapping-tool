@@ -4,8 +4,12 @@ import { clerkMiddleware, createRouteMatcher } from '@clerk/nextjs/server'
 const isProtectedRoute = createRouteMatcher(['/(.*)'])
 // Keep the chat API public from Clerk's perspective so Gemini works
 const isPublicApiRoute = createRouteMatcher(['/api/chat(.*)'])
+// Match static files
+const isStaticAsset = createRouteMatcher(['/_next(.*)', '/favicon.ico'])
 
 export default clerkMiddleware((auth, req) => {
+  // Bypass Clerk completely for static assets to prevent 404 crashes
+  if (isStaticAsset(req)) return;
   // Bypass Clerk for the AI chat endpoint
   if (isPublicApiRoute(req)) return;
   // Protect everything else
@@ -13,8 +17,6 @@ export default clerkMiddleware((auth, req) => {
 })
 
 export const config = {
-  matcher: [
-    '/((?!_next|[^?]*\\.(?:html?|css|js(?!on)|jpe?g|webp|png|gif|svg|ttf|woff2?|ico|csv|docx?|xlsx?|zip|webmanifest)).*)',
-    '/(api|trpc)(.*)',
-  ],
+  // Run middleware on ALL routes so auth() never crashes on 404s
+  matcher: ['/(.*)'],
 }
