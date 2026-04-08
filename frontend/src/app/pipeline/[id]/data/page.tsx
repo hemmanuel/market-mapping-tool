@@ -7,7 +7,7 @@ import ReactMarkdown from "react-markdown";
 import { useAuth } from "@clerk/nextjs";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Play, RefreshCw, Database, Activity, CheckCircle2, AlertCircle, Bot, Terminal } from "lucide-react";
+import { Play, RefreshCw, Database, Activity, CheckCircle2, AlertCircle, Bot, Terminal, Square } from "lucide-react";
 
 // Add global type for Clerk
 declare global {
@@ -77,11 +77,30 @@ export default function DataCommandCenter() {
         headers
       });
       if (!res.ok) throw new Error("Failed to start acquisition");
-      alert("Acquisition started in the background!");
     } catch (error) {
       console.error(error);
       alert("Failed to start acquisition.");
       setIsAcquiring(false);
+    }
+  };
+
+  const stopAcquisition = async () => {
+    try {
+      const token = await getToken();
+      const headers: Record<string, string> = {};
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+
+      const res = await fetch(`http://localhost:8000/api/v1/pipelines/${pipelineId}/cancel`, {
+        method: 'POST',
+        headers
+      });
+      if (!res.ok) throw new Error("Failed to stop acquisition");
+      setIsAcquiring(false);
+    } catch (error) {
+      console.error(error);
+      alert("Failed to stop acquisition.");
     }
   };
 
@@ -117,8 +136,13 @@ export default function DataCommandCenter() {
     eventSource.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        if (data.type === 'log') {
+        if (data.type === 'status') {
+          setIsAcquiring(data.is_acquiring);
+        } else if (data.type === 'log') {
           setLogs(prev => [...prev, `[${new Date().toLocaleTimeString()}] ${data.message}`]);
+          if (data.message === "Workflow completed successfully." || data.message === "Workflow aborted by user.") {
+            setIsAcquiring(false);
+          }
         } else if (data.type === 'queue') {
           setQueue(data.data);
         } else if (data.type === 'new_data') {
@@ -157,17 +181,21 @@ export default function DataCommandCenter() {
           <Button variant="outline" onClick={fetchExplorerData}>
             <RefreshCw className="w-4 h-4 mr-2" /> Refresh
           </Button>
-          <Button 
-            onClick={startAcquisition} 
-            disabled={isAcquiring}
-            className={isAcquiring ? "bg-emerald-600 hover:bg-emerald-700" : "bg-blue-600 hover:bg-blue-700"}
-          >
-            {isAcquiring ? (
-              <><Activity className="w-4 h-4 mr-2 animate-pulse" /> Acquiring Data...</>
-            ) : (
-              <><Play className="w-4 h-4 mr-2" /> Start Acquisition</>
-            )}
-          </Button>
+          {isAcquiring ? (
+            <Button 
+              onClick={stopAcquisition} 
+              variant="destructive"
+            >
+              <Square className="w-4 h-4 mr-2 fill-current" /> Stop Acquisition
+            </Button>
+          ) : (
+            <Button 
+              onClick={startAcquisition} 
+              className="bg-blue-600 hover:bg-blue-700"
+            >
+              <Play className="w-4 h-4 mr-2" /> Start Acquisition
+            </Button>
+          )}
         </div>
       </header>
 

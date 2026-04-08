@@ -71,9 +71,8 @@ class Document(Base):
     title: Mapped[Optional[str]] = mapped_column(String(512))
     raw_text: Mapped[str] = mapped_column(Text, nullable=False)
     
-    # Using an embedding dimension of 1536 as a placeholder. 
-    # This should be updated to match the local LLM embedding model (e.g., 768 for nomic).
-    embedding: Mapped[Optional[list[float]]] = mapped_column(Vector(1536)) 
+    # Using an embedding dimension of 768 to match Google's text-embedding-004.
+    embedding: Mapped[Optional[list[float]]] = mapped_column(Vector(768)) 
     
     metadata_json: Mapped[Optional[dict]] = mapped_column(JSONB)
     processed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

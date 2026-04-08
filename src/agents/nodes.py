@@ -12,15 +12,21 @@ from bs4 import BeautifulSoup
 import httpx
 from pydantic import BaseModel, Field
 
-from src.agents.state import AgentState, SearchQuery, ExtractedEntity, ExtractedRelationship
+from src.agents.state import AgentState, SearchQuery
 from src.db.neo4j_session import driver
 from src.api.events import event_manager
+from src.db.session import AsyncSessionLocal
+from src.models.relational import DataSource, Document as PGDocument
+from sqlalchemy.future import select
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# Initialize LLM
+# Initialize LLM and Embeddings
 llm = ChatGoogleGenerativeAI(model="gemini-3.1-pro-preview", api_key=os.getenv("GEMINI_API_KEY"))
+embeddings = GoogleGenerativeAIEmbeddings(model="text-embedding-004", google_api_key=os.getenv("GEMINI_API_KEY"))
 
 # Models for structured output
 class PlannerOutput(BaseModel):
@@ -29,14 +35,6 @@ class PlannerOutput(BaseModel):
 class BouncerOutput(BaseModel):
     is_relevant: bool = Field(description="Whether the text is relevant to the niche")
     reason: str = Field(description="Reason for relevance or irrelevance")
-
-class ExtractionOutput(BaseModel):
-    entities: List[ExtractedEntity] = Field(description="List of extracted entities")
-    relationships: List[ExtractedRelationship] = Field(description="List of extracted relationships")
-
-class ValidatorOutput(BaseModel):
-    is_accurate: bool = Field(description="Whether the extracted data is accurate based on the text")
-    errors_found: List[str] = Field(description="List of errors found, empty if accurate")
 
 async def planner_node(state: AgentState) -> AgentState:
     """Generates search queries based on the niche and schema."""
@@ -85,7 +83,7 @@ async def search_node(state: AgentState) -> AgentState:
             }
             payload = {
                 "q": search_term,
-                "num": 3
+                "num": 10
             }
             
             async with httpx.AsyncClient() as client:
@@ -239,106 +237,67 @@ async def bouncer_node(state: AgentState) -> AgentState:
         
     return {**state, "is_relevant": result.is_relevant, "relevance_reason": result.reason}
 
-async def extractor_node(state: AgentState) -> AgentState:
-    """Extracts strict JSON matching the schema."""
+async def vector_storage_node(state: AgentState) -> AgentState:
+    """Chunks text, generates embeddings, and saves to PostgreSQL."""
     pipeline_id = state["pipeline_id"]
-    await event_manager.publish(pipeline_id, {"type": "log", "message": "[Extractor] Extracting entities and relationships..."})
+    await event_manager.publish(pipeline_id, {"type": "log", "message": "[VectorStorage] Preparing to save chunks to PostgreSQL..."})
     
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", "You are a strict data extraction parser. Extract entities and relationships from the provided text using the provided schema. You may ONLY extract information explicitly stated in the text. Do NOT use outside knowledge. Provide exact quotes and source URLs."),
-        ("user", "Schema Entities: {schema_entities}\nSchema Relationships: {schema_relationships}\nSource URL: {current_url}\nText: {raw_text}")
-    ])
-    
-    chain = prompt | llm.with_structured_output(ExtractionOutput)
-    result = await chain.ainvoke({
-        "schema_entities": state["schema_entities"],
-        "schema_relationships": state["schema_relationships"],
-        "current_url": state["current_url"],
-        "raw_text": state["raw_text"]
-    })
-    
-    await event_manager.publish(pipeline_id, {"type": "log", "message": f"[Extractor] Found {len(result.entities)} entities and {len(result.relationships)} relationships."})
-    
-    return {
-        **state, 
-        "extracted_entities": result.entities, 
-        "extracted_relationships": result.relationships
-    }
-
-async def validator_node(state: AgentState) -> AgentState:
-    """Checks JSON against raw text for hallucinations."""
-    pipeline_id = state["pipeline_id"]
-    await event_manager.publish(pipeline_id, {"type": "log", "message": "[Validator] Checking for hallucinations..."})
-    
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", "You are a Fact-Checking Validator. Verify the extracted entities and relationships against the original text. Ensure exact quotes match the text and no outside knowledge was used."),
-        ("user", "Original Text: {raw_text}\nExtracted Entities: {extracted_entities}\nExtracted Relationships: {extracted_relationships}")
-    ])
-    
-    chain = prompt | llm.with_structured_output(ValidatorOutput)
-    result = await chain.ainvoke({
-        "raw_text": state["raw_text"],
-        "extracted_entities": state["extracted_entities"],
-        "extracted_relationships": state["extracted_relationships"]
-    })
-    
-    if result.is_accurate:
-        await event_manager.publish(pipeline_id, {"type": "log", "message": "[Validator] Data passed validation."})
-    else:
-        await event_manager.publish(pipeline_id, {"type": "log", "message": f"[Validator] Failed: {result.errors_found}"})
-        
-    return {
-        **state, 
-        "is_valid": result.is_accurate, 
-        "validation_errors": result.errors_found
-    }
-
-async def storage_node(state: AgentState) -> AgentState:
-    """Writes validated data to Neo4j."""
-    pipeline_id = state["pipeline_id"]
-    await event_manager.publish(pipeline_id, {"type": "log", "message": "[Storage] Preparing to save to Neo4j..."})
-    
-    if not state.get("is_valid") or not state.get("extracted_entities"):
-        await event_manager.publish(pipeline_id, {"type": "log", "message": "[Storage] Skipped: Data invalid or empty."})
+    if not state.get("raw_text"):
+        await event_manager.publish(pipeline_id, {"type": "log", "message": "[VectorStorage] Skipped: No raw text to process."})
         return state
         
-    entities = state["extracted_entities"]
-    relationships = state["extracted_relationships"]
+    raw_text = state["raw_text"]
+    current_url = state["current_url"]
     
-    stored_entities = 0
-    stored_relationships = 0
+    # Chunk the text
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    chunks = splitter.split_text(raw_text)
+    await event_manager.publish(pipeline_id, {"type": "log", "message": f"[VectorStorage] Split text into {len(chunks)} chunks."})
     
-    async with driver.session() as session:
-        for ent in entities:
-            # Upsert entity
-            query = f"""
-            MERGE (e:`{ent['type']}` {{name: $name}})
-            SET e.source_url = $source_url, e.exact_quote = $exact_quote, e.pipeline_id = $pipeline_id
-            """
-            await session.run(query, name=ent["name"], source_url=ent["source_url"], exact_quote=ent["exact_quote"], pipeline_id=pipeline_id)
-            stored_entities += 1
+    if not chunks:
+        return state
+        
+    # Generate embeddings
+    try:
+        chunk_embeddings = await embeddings.aembed_documents(chunks)
+    except Exception as e:
+        await event_manager.publish(pipeline_id, {"type": "log", "message": f"[VectorStorage] Failed to generate embeddings: {e}"})
+        print(f"Failed to embed chunks: {e}")
+        return state
+        
+    stored_chunks = 0
+    
+    async with AsyncSessionLocal() as session:
+        try:
+            # Find a data source for this pipeline (site)
+            # This assumes at least one data source exists for the site
+            result = await session.execute(select(DataSource).where(DataSource.site_id == pipeline_id).limit(1))
+            data_source = result.scalars().first()
             
-        for rel in relationships:
-            # Upsert relationship
-            # Note: In a real system, we'd need to know the types of source and target to MATCH them properly.
-            # For this prototype, we'll assume they exist and match by name across all labels.
-            query = f"""
-            MATCH (s {{name: $source}})
-            MATCH (t {{name: $target}})
-            MERGE (s)-[r:`{rel['type'].replace(' ', '_').upper()}`]->(t)
-            SET r.source_url = $source_url, r.exact_quote = $exact_quote, r.pipeline_id = $pipeline_id
-            """
-            try:
-                await session.run(query, source=rel["source"], target=rel["target"], source_url=rel["source_url"], exact_quote=rel["exact_quote"], pipeline_id=pipeline_id)
-                stored_relationships += 1
-            except Exception as e:
-                await event_manager.publish(pipeline_id, {"type": "log", "message": f"[Storage] Failed to store relationship: {e}"})
-                print(f"Failed to store relationship {rel}: {e}")
+            if not data_source:
+                await event_manager.publish(pipeline_id, {"type": "log", "message": "[VectorStorage] Error: No DataSource found for this pipeline."})
+                return state
                 
-    await event_manager.publish(pipeline_id, {"type": "log", "message": f"[Storage] Saved {stored_entities} entities and {stored_relationships} relationships to Neo4j."})
-    
+            for i, chunk in enumerate(chunks):
+                doc = PGDocument(
+                    data_source_id=data_source.id,
+                    title=f"Extracted from {current_url} (Chunk {i+1})",
+                    raw_text=chunk,
+                    embedding=chunk_embeddings[i],
+                    metadata_json={"source_url": current_url, "chunk_index": i}
+                )
+                session.add(doc)
+                stored_chunks += 1
+                
+            await session.commit()
+            await event_manager.publish(pipeline_id, {"type": "log", "message": f"[VectorStorage] Saved {stored_chunks} embedded chunks to PostgreSQL."})
+            
+        except Exception as e:
+            await session.rollback()
+            await event_manager.publish(pipeline_id, {"type": "log", "message": f"[VectorStorage] Database error: {e}"})
+            print(f"Database error in VectorStorage: {e}")
+            
     return {
         **state,
-        "stored_entities": state.get("stored_entities", 0) + stored_entities,
-        "stored_relationships": state.get("stored_relationships", 0) + stored_relationships
+        "stored_chunks": state.get("stored_chunks", 0) + stored_chunks
     }

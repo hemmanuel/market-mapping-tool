@@ -15,7 +15,10 @@ from src.api.events import event_manager
 
 router = APIRouter()
 
-async def run_acquisition_workflow(site_id: str, niche: str, ontology: dict):
+# Global registry to track active workflows and their cancellation events
+active_workflows: dict[str, asyncio.Event] = {}
+
+async def run_acquisition_workflow(site_id: str, niche: str, ontology: dict, cancel_event: asyncio.Event):
     # Initialize the graph
     graph = build_acquisition_graph()
     
@@ -45,6 +48,10 @@ async def run_acquisition_workflow(site_id: str, niche: str, ontology: dict):
         
         # Use astream instead of stream for async
         async for output in graph.astream(state):
+            if cancel_event.is_set():
+                await event_manager.publish(site_id, {"type": "log", "message": "Workflow aborted by user."})
+                break
+                
             node_name = list(output.keys())[0]
             node_state = output[node_name]
             
@@ -54,19 +61,20 @@ async def run_acquisition_workflow(site_id: str, niche: str, ontology: dict):
                     queue_items = [{"url": url, "status": "queued", "type": "Web"} for url in node_state["urls_to_scrape"]]
                     await event_manager.publish(site_id, {"type": "queue", "data": queue_items})
             
-            # Publish new data event to instantly update the frontend Vault
-            elif node_name == "storage":
-                if node_state.get('extracted_entities') or node_state.get('extracted_relationships'):
-                    await event_manager.publish(site_id, {
-                        "type": "new_data", 
-                        "entities": node_state.get('extracted_entities', []), 
-                        "relationships": node_state.get('extracted_relationships', [])
-                    })
+            # Publish vector storage logging
+            elif node_name == "vector_storage":
+                stored_chunks = node_state.get('stored_chunks', 0)
+                # We don't have new_data event for frontend Vault yet, it will be empty
+                pass
                 
-        await event_manager.publish(site_id, {"type": "log", "message": "Workflow completed successfully."})
+        if not cancel_event.is_set():
+            await event_manager.publish(site_id, {"type": "log", "message": "Workflow completed successfully."})
     except Exception as e:
         await event_manager.publish(site_id, {"type": "log", "message": f"Workflow failed: {str(e)}"})
         print(f"Workflow failed: {e}")
+    finally:
+        active_workflows.pop(site_id, None)
+        await event_manager.publish(site_id, {"type": "status", "is_acquiring": False})
 
 @router.get("/pipelines/{site_id}/logs")
 async def stream_pipeline_logs(site_id: str, request: Request):
@@ -102,9 +110,37 @@ async def trigger_acquisition(
         raise HTTPException(status_code=404, detail="Pipeline not found")
 
     # Trigger background task
-    background_tasks.add_task(run_acquisition_workflow, str(site.id), site.name, site.ontology)
+    if site_id in active_workflows:
+        return {"message": "Acquisition already running"}
+        
+    cancel_event = asyncio.Event()
+    active_workflows[site_id] = cancel_event
+    background_tasks.add_task(run_acquisition_workflow, str(site.id), site.name, site.ontology, cancel_event)
     
     return {"message": "Data acquisition started in background"}
+
+@router.post("/pipelines/{site_id}/cancel", status_code=200)
+async def cancel_acquisition(
+    site_id: str,
+    db: AsyncSession = Depends(get_db_session),
+    user_id: str = Depends(get_current_tenant)
+):
+    # Verify site exists and belongs to user's tenant
+    result = await db.execute(select(Tenant).where(Tenant.auth_id == user_id))
+    tenant = result.scalars().first()
+    if not tenant:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    result = await db.execute(select(Site).where(Site.id == site_id, Site.tenant_id == tenant.id))
+    site = result.scalars().first()
+    if not site:
+        raise HTTPException(status_code=404, detail="Pipeline not found")
+
+    if site_id in active_workflows:
+        active_workflows[site_id].set()
+        return {"message": "Cancellation requested"}
+    
+    return {"message": "No active workflow found"}
 
 @router.get("/pipelines/{site_id}/entities")
 async def get_pipeline_entities(

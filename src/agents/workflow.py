@@ -2,7 +2,7 @@ from langgraph.graph import StateGraph, END
 from src.agents.state import AgentState
 from src.agents.nodes import (
     planner_node, search_node, scrape_node, 
-    bouncer_node, extractor_node, validator_node, storage_node
+    bouncer_node, vector_storage_node
 )
 
 def build_acquisition_graph() -> StateGraph:
@@ -13,9 +13,7 @@ def build_acquisition_graph() -> StateGraph:
     workflow.add_node("searcher", search_node)
     workflow.add_node("scraper", scrape_node)
     workflow.add_node("bouncer", bouncer_node)
-    workflow.add_node("extractor", extractor_node)
-    workflow.add_node("validator", validator_node)
-    workflow.add_node("storage", storage_node)
+    workflow.add_node("vector_storage", vector_storage_node)
 
     # Add edges
     workflow.add_edge("planner", "searcher")
@@ -31,25 +29,13 @@ def build_acquisition_graph() -> StateGraph:
     # Conditional logic after bouncer
     def check_relevance(state: AgentState):
         if state.get("is_relevant"):
-            return "extractor"
+            return "vector_storage"
         else:
             return route_after_processing(state)
 
-    workflow.add_conditional_edges("bouncer", check_relevance, {"extractor": "extractor", "scraper": "scraper", END: END})
+    workflow.add_conditional_edges("bouncer", check_relevance, {"vector_storage": "vector_storage", "scraper": "scraper", END: END})
 
-    workflow.add_edge("extractor", "validator")
-
-    # Conditional logic after validation
-    def check_validation(state: AgentState):
-        if state.get("is_valid"):
-            return "storage"
-        else:
-            # If invalid, we could route back to extractor for correction, but for now we'll just move to next URL
-            return route_after_processing(state)
-
-    workflow.add_conditional_edges("validator", check_validation, {"storage": "storage", "scraper": "scraper", END: END})
-    
-    workflow.add_conditional_edges("storage", route_after_processing, {"scraper": "scraper", END: END})
+    workflow.add_conditional_edges("vector_storage", route_after_processing, {"scraper": "scraper", END: END})
 
     workflow.set_entry_point("planner")
 
