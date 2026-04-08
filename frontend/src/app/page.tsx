@@ -6,9 +6,17 @@ import ReactMarkdown from "react-markdown";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Send, Bot, User, Settings, Plus, Trash2, Target, Database, Network, Link, CheckCircle2 } from "lucide-react";
-import { OnboardingStep, PipelineConfig, DataSource } from "@/lib/types";
+import { Send, Bot, User, Settings, Plus, Trash2, Target, Database, Network, CheckCircle2 } from "lucide-react";
+import { OnboardingStep, PipelineConfig } from "@/lib/types";
 import { Timeline } from "@/components/Timeline";
+
+// Add global type for Clerk
+declare global {
+  interface Window {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    Clerk?: any;
+  }
+}
 
 export default function OnboardingWizard() {
   const [currentStep, setCurrentStep] = useState<OnboardingStep>('niche');
@@ -19,8 +27,7 @@ export default function OnboardingWizard() {
     sources: []
   });
 
-  const [isDeploying, setIsDeploying] = useState(false);
-  const [deploySuccess, setDeploySuccess] = useState(false);
+  const [, setIsDeploying] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const { messages, input, handleInputChange, handleSubmit, isLoading, append } = useChat({
@@ -54,15 +61,19 @@ export default function OnboardingWizard() {
               }, 500);
             }
             break;
-          case 'sync_entities_state':
-            setConfig(prev => ({
-              ...prev,
-              schema: {
-                ...prev.schema!,
-                entities: args.entities
-              }
-            }));
-            if (args.is_finished && currentStep !== 'relationships') {
+          case 'sync_entities':
+            if (JSON.stringify(config.schema?.entities) !== JSON.stringify(args.entities)) {
+              setConfig(prev => ({
+                ...prev,
+                schema: {
+                  ...prev.schema!,
+                  entities: args.entities
+                }
+              }));
+            }
+            break;
+          case 'finalize_entities':
+            if (currentStep !== 'relationships') {
               setCurrentStep('relationships');
               setTimeout(() => {
                 append({
@@ -72,42 +83,79 @@ export default function OnboardingWizard() {
               }, 500);
             }
             break;
-          case 'sync_relationships_state':
-            setConfig(prev => ({
-              ...prev,
-              schema: {
-                ...prev.schema!,
-                relationships: args.relationships
-              }
-            }));
-            if (args.is_finished && currentStep !== 'sources') {
-              setCurrentStep('sources');
-              setTimeout(() => {
-                append({
-                  role: 'user',
-                  content: `SYSTEM_AUTO_PROMPT: We are now in the Data Sources step. Please briefly explain what data sources are (e.g., RSS feeds, APIs, websites), suggest some relevant sources for our niche, add them to the schema using the tool, and ask me if I want to add more or remove any.`
-                });
-              }, 500);
+          case 'sync_relationships':
+            const newRelationships = JSON.stringify(args.relationships);
+            const oldRelationships = JSON.stringify(config.schema?.relationships);
+            const newEntities = JSON.stringify(args.entities || config.schema?.entities);
+            const oldEntities = JSON.stringify(config.schema?.entities);
+            
+            if (newRelationships !== oldRelationships || newEntities !== oldEntities) {
+              setConfig(prev => ({
+                ...prev,
+                schema: {
+                  ...prev.schema!,
+                  relationships: args.relationships,
+                  entities: args.entities || prev.schema!.entities
+                }
+              }));
             }
             break;
-          case 'sync_sources_state':
-            setConfig(prev => ({
-              ...prev,
-              sources: args.sources
-            }));
-            if (args.is_finished && currentStep !== 'review') {
-              setCurrentStep('review');
-              setTimeout(() => {
-                append({
-                  role: 'user',
-                  content: `SYSTEM_AUTO_PROMPT: We are now in the Review step. Please congratulate me on finishing the configuration, summarize the pipeline we just built, and tell me to click the Deploy Pipeline button in the right pane when I'm ready.`
-                });
-              }, 500);
+          case 'finalize_relationships':
+            if (currentStep !== 'sources') {
+              setCurrentStep('sources'); // Advance step to prevent re-triggering
+              setIsDeploying(true);
+              
+              const finalConfig = {
+                ...config,
+                schema: {
+                  entities: config.schema?.entities || [],
+                  relationships: config.schema?.relationships || []
+                }
+              };
+              
+              // Add a small delay to let the UI update before redirecting
+              setTimeout(async () => {
+                try {
+                  // We need to get the Clerk token to authenticate the request
+                  // Fetching it directly from window.Clerk avoids adding hooks to the dependency array
+                  const token = await window.Clerk?.session?.getToken();
+                  
+                  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+                  if (token) {
+                    headers['Authorization'] = `Bearer ${token}`;
+                  }
+
+                  const res = await fetch('http://localhost:8000/api/v1/pipelines', {
+                    method: 'POST',
+                    headers,
+                    body: JSON.stringify(finalConfig),
+                  });
+
+                  if (!res.ok) {
+                    throw new Error(`Server returned ${res.status}`);
+                  }
+
+                  const data = await res.json();
+                  
+                  if (data.site_id) {
+                    window.location.href = `/pipeline/${data.site_id}/data`;
+                  } else {
+                    console.error("No site_id in response:", data);
+                    setIsDeploying(false);
+                    alert('Failed to save pipeline: Invalid response from server');
+                  }
+                } catch (err) {
+                  console.error(err);
+                  setIsDeploying(false);
+                  alert('Failed to save pipeline. Check console for details.');
+                }
+              }, 1000);
             }
             break;
         }
       });
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages, config.niche, config.schema, config.sources, append, currentStep]);
 
   // Update config.currentStep when currentStep changes
@@ -138,50 +186,7 @@ export default function OnboardingWizard() {
     }
   };
 
-  const handleAddSource = (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    const form = e.currentTarget;
-    const nameInput = form.elements.namedItem('sourceName') as HTMLInputElement;
-    const urlInput = form.elements.namedItem('sourceUrl') as HTMLInputElement;
-    const typeSelect = form.elements.namedItem('sourceType') as HTMLSelectElement;
-    
-    const name = nameInput.value.trim();
-    const url = urlInput.value.trim();
-    const type = typeSelect.value as DataSource['type'];
-    
-    if (name && url && !config.sources.find(s => s.url === url)) {
-      setConfig(prev => ({
-        ...prev,
-        sources: [...prev.sources, { name, url, type }]
-      }));
-      nameInput.value = '';
-      urlInput.value = '';
-    }
-  };
 
-  const handleDeploy = async () => {
-    setIsDeploying(true);
-    try {
-      const res = await fetch('http://localhost:8000/api/v1/pipelines', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(config),
-      });
-
-      if (!res.ok) {
-        throw new Error('Failed to deploy pipeline');
-      }
-
-      setDeploySuccess(true);
-    } catch (error) {
-      console.error(error);
-      alert('Failed to deploy pipeline. Check console for details.');
-    } finally {
-      setIsDeploying(false);
-    }
-  };
 
   const isPaneVisible = currentStep !== 'niche';
 
@@ -212,7 +217,13 @@ export default function OnboardingWizard() {
               )}
               
               {messages.map((m) => {
-                if (m.role === "assistant" && !m.content) return null;
+                // Extract the message from the tool call if it exists
+                const toolCall = m.toolInvocations?.[0];
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                const toolMessage = toolCall && 'args' in toolCall ? (toolCall.args as any).message_to_user : null;
+                const contentToRender = m.content || toolMessage;
+
+                if (m.role === "assistant" && !contentToRender) return null;
                 if (m.role === "user" && m.content.startsWith("SYSTEM_AUTO_PROMPT:")) return null;
                 
                 return (
@@ -233,10 +244,10 @@ export default function OnboardingWizard() {
                           : "bg-slate-100 text-slate-800 rounded-tl-none"
                       }`}
                     >
-                      {m.content && (
+                      {contentToRender && (
                         <div className={`prose prose-sm max-w-none ${m.role === "user" ? "text-white prose-p:text-white prose-strong:text-white" : "prose-slate"}`}>
                           <ReactMarkdown>
-                            {m.content}
+                            {contentToRender}
                           </ReactMarkdown>
                         </div>
                       )}
@@ -290,16 +301,6 @@ export default function OnboardingWizard() {
                 <Settings className="w-5 h-5 text-emerald-600" />
                 <h2 className="font-semibold text-lg">Define Market</h2>
               </div>
-              {currentStep === 'review' && (
-                <Button 
-                  size="sm" 
-                  className={deploySuccess ? "bg-blue-600 hover:bg-blue-700 text-white" : "bg-emerald-600 hover:bg-emerald-700 text-white"}
-                  onClick={handleDeploy}
-                  disabled={isDeploying || deploySuccess}
-                >
-                  {isDeploying ? 'Deploying...' : deploySuccess ? 'Deployed Successfully!' : 'Deploy Pipeline'}
-                </Button>
-              )}
             </div>
             
             <div className="flex-1 overflow-y-auto p-6">
@@ -379,58 +380,6 @@ export default function OnboardingWizard() {
                       </div>
                     ) : (
                       <p className="text-sm text-slate-500 mt-1">Map how entities connect to each other.</p>
-                    )}
-                  </div>
-                </div>
-
-                {/* Step 4: Data Sources */}
-                <div className={`relative flex items-start gap-4 ${(currentStep === 'sources' || currentStep === 'review') ? 'opacity-100' : 'opacity-50'}`}>
-                  <div className={`z-10 flex items-center justify-center w-10 h-10 rounded-full border-2 bg-white ${currentStep === 'review' ? 'border-emerald-500 text-emerald-500' : currentStep === 'sources' ? 'border-blue-600 text-blue-600' : 'border-slate-300 text-slate-400'}`}>
-                    {currentStep === 'review' ? <CheckCircle2 className="w-5 h-5" /> : <Link className="w-5 h-5" />}
-                  </div>
-                  <div className="flex-1 pt-1.5 pb-6">
-                    <h3 className="text-base font-semibold text-slate-900">Data Sources</h3>
-                    {(currentStep === 'sources' || currentStep === 'review') ? (
-                      <div className="mt-2 p-4 bg-white border border-slate-200 rounded-md shadow-sm">
-                        <div className="space-y-2">
-                          {config.sources.map((source, idx) => (
-                            <div key={idx} className="flex items-center justify-between bg-slate-50 p-3 rounded border border-slate-100">
-                              <div>
-                                <div className="font-medium text-sm flex items-center gap-2">
-                                  {source.name} <Badge variant="outline" className="text-[10px] h-5">{source.type}</Badge>
-                                </div>
-                                <div className="text-xs text-slate-500 font-mono mt-1 truncate max-w-sm">{source.url}</div>
-                              </div>
-                              {currentStep === 'sources' && (
-                                <Button size="icon" variant="ghost" className="h-8 w-8 text-slate-400 hover:text-red-500" onClick={() => setConfig(prev => ({...prev, sources: prev.sources.filter(s => s.url !== source.url)}))}>
-                                  <Trash2 className="w-4 h-4" />
-                                </Button>
-                              )}
-                            </div>
-                          ))}
-                          {config.sources.length === 0 && <div className="text-sm text-slate-400 italic p-4 text-center border border-dashed rounded">No data sources added yet.</div>}
-                        </div>
-                        
-                        {currentStep === 'sources' && (
-                          <form onSubmit={handleAddSource} className="flex flex-col gap-2 pt-4 mt-4 border-t border-slate-100">
-                            <div className="flex gap-2">
-                              <Input name="sourceName" placeholder="Source Name" className="text-sm flex-1" required />
-                              <select name="sourceType" className="flex h-10 w-32 items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50">
-                                <option value="rss">RSS</option>
-                                <option value="api">API</option>
-                                <option value="webhook">Webhook</option>
-                                <option value="custom">Custom</option>
-                              </select>
-                            </div>
-                            <div className="flex gap-2">
-                              <Input name="sourceUrl" placeholder="URL (e.g., https://...)" className="text-sm flex-1" required />
-                              <Button type="submit" size="sm" variant="secondary"><Plus className="w-4 h-4 mr-1" /> Add</Button>
-                            </div>
-                          </form>
-                        )}
-                      </div>
-                    ) : (
-                      <p className="text-sm text-slate-500 mt-1">Connect external data feeds.</p>
                     )}
                   </div>
                 </div>

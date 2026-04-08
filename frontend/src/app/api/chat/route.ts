@@ -33,6 +33,7 @@ export async function POST(req: Request) {
           description: 'Lock in the market niche and advance to defining entities.',
           parameters: z.object({
             niche_name: z.string().describe('The name of the market niche (e.g., "Solid State Batteries")'),
+            message_to_user: z.string().describe('A conversational message to the user explaining what you did and asking for the next input.'),
           }),
           execute: async ({ niche_name }) => {
             return { success: true, message: `Niche locked as "${niche_name}". The system will now advance to defining entities.` };
@@ -48,20 +49,29 @@ We are currently defining the Entities for the Graph Ontology.
 CURRENT ENTITIES: ${JSON.stringify(currentConfig.schema?.entities || [])}
 
 Your job is to proactively help the user define entities.
-Always respond to the user with a conversational text message.
-In the same turn, ALWAYS call the \`sync_entities_state\` tool to reflect the complete, current list of entities.
-If you are still brainstorming or adding entities, set \`is_finished: false\`.
-ONLY when the user explicitly agrees the list is complete (e.g., "looks good", "we are done", "move on"), set \`is_finished: true\`.`;
+CRITICAL INSTRUCTIONS:
+1. You MUST write your conversational text response inside the \`message_to_user\` parameter of the tool call. Explain what you are adding and ask for the user's feedback.
+2. Call the \`sync_entities\` tool to reflect the current list of entities when you are proposing them.
+3. ONLY call the \`finalize_entities\` tool AFTER the user explicitly replies with "looks good", "yes", or "move on" to your proposed list.`;
       
       tools = {
-        sync_entities_state: tool({
-          description: 'Sync the complete list of entities and indicate if the user is finished.',
+        sync_entities: tool({
+          description: 'Sync the complete list of entities and propose them to the user.',
           parameters: z.object({
             entities: z.array(z.string()).describe('The complete, current list of entities (e.g., ["Company", "Founder"])'),
-            is_finished: z.boolean().describe('True ONLY if the user explicitly agreed the list is complete and wants to move on.')
+            message_to_user: z.string().describe('A conversational message to the user explaining what you added and asking for their feedback.'),
           }),
-          execute: async ({ entities, is_finished }) => {
-            return { success: true, message: `Synced ${entities.length} entities. Finished: ${is_finished}` };
+          execute: async ({ entities }) => {
+            return { success: true, message: `Synced ${entities.length} entities.` };
+          }
+        }),
+        finalize_entities: tool({
+          description: 'Lock in the entities and advance to defining relationships. Call this ONLY when the user explicitly agrees.',
+          parameters: z.object({
+            message_to_user: z.string().describe('A conversational message acknowledging the user\'s agreement and transitioning to relationships.'),
+          }),
+          execute: async () => {
+            return { success: true, message: `Entities finalized. The system will now advance to defining relationships.` };
           }
         })
       };
@@ -75,63 +85,39 @@ We are currently defining the Relationships between these entities.
 CURRENT RELATIONSHIPS: ${JSON.stringify(currentConfig.schema?.relationships || [])}
 
 Your job is to proactively help the user define relationships.
-Always respond to the user with a conversational text message.
-In the same turn, ALWAYS call the \`sync_relationships_state\` tool to reflect the complete, current list of relationships.
-If you are still brainstorming or adding relationships, set \`is_finished: false\`.
-ONLY when the user explicitly agrees the list is complete (e.g., "looks good", "we are done", "move on"), set \`is_finished: true\`.`;
+CRITICAL INSTRUCTIONS:
+1. You MUST write your conversational text response inside the \`message_to_user\` parameter of the tool call. Explain what you are adding and ask for the user's feedback.
+2. Call the \`sync_relationships\` tool to reflect the current list of relationships when you are proposing them.
+3. ONLY call the \`finalize_relationships\` tool AFTER the user explicitly replies with "looks good", "yes", or "move on" to your proposed list.`;
       
       tools = {
-        sync_relationships_state: tool({
-          description: 'Sync the complete list of relationships and indicate if the user is finished.',
+        sync_relationships: tool({
+          description: 'Sync the complete list of relationships and entities, and propose them to the user.',
           parameters: z.object({
             relationships: z.array(z.object({
               source: z.string().describe('The source entity type'),
               type: z.string().describe('The relationship type (e.g., "DEVELOPS")'),
               target: z.string().describe('The target entity type')
             })).describe('The complete, current list of relationships'),
-            is_finished: z.boolean().describe('True ONLY if the user explicitly agreed the list is complete and wants to move on.')
+            entities: z.array(z.string()).describe('The complete, current list of entities. Add to this list if a new relationship requires a new entity.'),
+            message_to_user: z.string().describe('A conversational message to the user explaining what you added and asking for their feedback.'),
           }),
-          execute: async ({ relationships, is_finished }) => {
-            return { success: true, message: `Synced ${relationships.length} relationships. Finished: ${is_finished}` };
+          execute: async ({ relationships, entities }) => {
+            return { success: true, message: `Synced ${relationships.length} relationships and ${entities.length} entities.` };
           }
-        })
-      };
-      break;
-
-    case 'sources':
-      systemPrompt = `You are an expert VC/PE Market Intelligence Consultant. 
-The user has chosen the niche: "${currentConfig.niche}".
-We are now gathering data sources (RSS feeds, APIs, websites) to ingest data from.
-
-Your job is to proactively help the user define data sources.
-Always respond to the user with a conversational text message.
-In the same turn, ALWAYS call the \`sync_sources_state\` tool to reflect the complete, current list of data sources.
-If you are still brainstorming or adding sources, set \`is_finished: false\`.
-ONLY when the user explicitly agrees the list is complete (e.g., "looks good", "we are done", "move on"), set \`is_finished: true\`.`;
-      
-      tools = {
-        sync_sources_state: tool({
-          description: 'Sync the complete list of data sources and indicate if the user is finished.',
+        }),
+        finalize_relationships: tool({
+          description: 'Lock in the relationships and advance to gathering data sources. Call this ONLY when the user explicitly agrees.',
           parameters: z.object({
-            sources: z.array(z.object({
-              type: z.enum(['rss', 'api', 'webhook', 'custom']).describe('The type of data source'),
-              url: z.string().describe('The URL or endpoint for the data source'),
-              name: z.string().describe('A human-readable name for the source')
-            })).describe('The complete, current list of sources'),
-            is_finished: z.boolean().describe('True ONLY if the user explicitly agreed the list is complete and wants to move on.')
+            message_to_user: z.string().describe('A conversational message acknowledging the user\'s agreement and transitioning to data sources.'),
           }),
-          execute: async ({ sources, is_finished }) => {
-            return { success: true, message: `Synced ${sources.length} sources. Finished: ${is_finished}` };
+          execute: async () => {
+            return { success: true, message: `Relationships finalized. The system will now advance to data sources.` };
           }
         })
       };
       break;
-      
-    case 'review':
-      systemPrompt = `You are an expert VC/PE Market Intelligence Consultant. 
-The configuration is complete. The user is reviewing the final pipeline configuration.
-Answer any final questions they have before they deploy.`;
-      break;
+
   }
 
   const result = await streamText({
@@ -139,7 +125,6 @@ Answer any final questions they have before they deploy.`;
     system: systemPrompt,
     messages,
     tools,
-    maxSteps: 5, // Allow the model to call tools and respond with text in the same turn
   });
 
   return result.toDataStreamResponse();

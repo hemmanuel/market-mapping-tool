@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
@@ -7,8 +7,112 @@ from src.db.session import get_db_session
 from src.models.relational import Tenant, Site, DataSource
 from src.api.schemas import PipelineConfig
 from src.api.auth import get_current_tenant
+from src.agents.workflow import build_acquisition_graph
 
 router = APIRouter()
+
+def run_acquisition_workflow(site_id: str, niche: str, ontology: dict):
+    # Initialize the graph
+    graph = build_acquisition_graph()
+    
+    # Initial state
+    state = {
+        "pipeline_id": site_id,
+        "niche": niche,
+        "schema_entities": ontology.get("entities", []),
+        "schema_relationships": ontology.get("relationships", []),
+        "search_queries": [],
+        "urls_to_scrape": [],
+        "current_url": None,
+        "raw_text": None,
+        "is_relevant": False,
+        "relevance_reason": None,
+        "extracted_entities": [],
+        "extracted_relationships": [],
+        "validation_errors": [],
+        "is_valid": False,
+        "stored_entities": 0,
+        "stored_relationships": 0
+    }
+    
+    # Run the graph
+    # In a real app, we'd stream this or save state to DB
+    try:
+        for output in graph.stream(state):
+            # Log progress or save to DB
+            print(f"Workflow step completed: {list(output.keys())}")
+    except Exception as e:
+        print(f"Workflow failed: {e}")
+
+@router.post("/pipelines/{site_id}/acquire", status_code=202)
+async def trigger_acquisition(
+    site_id: str,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db_session),
+    user_id: str = Depends(get_current_tenant)
+):
+    # Verify site exists and belongs to user's tenant
+    result = await db.execute(select(Tenant).where(Tenant.auth_id == user_id))
+    tenant = result.scalars().first()
+    if not tenant:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    result = await db.execute(select(Site).where(Site.id == site_id, Site.tenant_id == tenant.id))
+    site = result.scalars().first()
+    if not site:
+        raise HTTPException(status_code=404, detail="Pipeline not found")
+
+    # Trigger background task
+    background_tasks.add_task(run_acquisition_workflow, str(site.id), site.name, site.ontology)
+    
+    return {"message": "Data acquisition started in background"}
+
+@router.get("/pipelines/{site_id}/entities")
+async def get_pipeline_entities(
+    site_id: str,
+    db: AsyncSession = Depends(get_db_session),
+    user_id: str = Depends(get_current_tenant)
+):
+    from src.db.neo4j_session import driver
+    
+    # Verify site exists and belongs to user's tenant
+    result = await db.execute(select(Tenant).where(Tenant.auth_id == user_id))
+    tenant = result.scalars().first()
+    if not tenant:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    result = await db.execute(select(Site).where(Site.id == site_id, Site.tenant_id == tenant.id))
+    site = result.scalars().first()
+    if not site:
+        raise HTTPException(status_code=404, detail="Pipeline not found")
+
+    entities = []
+    relationships = []
+    
+    async with driver.session() as session:
+        # Fetch entities
+        result = await session.run("MATCH (n) WHERE n.pipeline_id = $pipeline_id RETURN n, labels(n) as labels LIMIT 100", pipeline_id=site_id)
+        records = await result.data()
+        for record in records:
+            node = record["n"]
+            labels = record["labels"]
+            entities.append({
+                "name": node.get("name"),
+                "type": labels[0] if labels else "Unknown",
+                "source_url": node.get("source_url")
+            })
+            
+        # Fetch relationships
+        result = await session.run("MATCH (s)-[r]->(t) WHERE r.pipeline_id = $pipeline_id RETURN s.name as source, type(r) as type, t.name as target LIMIT 100", pipeline_id=site_id)
+        records = await result.data()
+        for record in records:
+            relationships.append({
+                "source": record["source"],
+                "type": record["type"],
+                "target": record["target"]
+            })
+
+    return {"entities": entities, "relationships": relationships}
 
 @router.post("/pipelines", status_code=201)
 async def create_pipeline(
