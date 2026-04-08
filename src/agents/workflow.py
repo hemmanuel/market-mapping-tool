@@ -22,28 +22,34 @@ def build_acquisition_graph() -> StateGraph:
     workflow.add_edge("searcher", "scraper")
     workflow.add_edge("scraper", "bouncer")
 
+    # Route back to scraper if there are more URLs
+    def route_after_processing(state: AgentState):
+        if state.get("urls_to_scrape") and len(state["urls_to_scrape"]) > 0:
+            return "scraper"
+        return END
+
     # Conditional logic after bouncer
     def check_relevance(state: AgentState):
-        if state["is_relevant"]:
+        if state.get("is_relevant"):
             return "extractor"
         else:
-            return END
+            return route_after_processing(state)
 
-    workflow.add_conditional_edges("bouncer", check_relevance, {"extractor": "extractor", END: END})
+    workflow.add_conditional_edges("bouncer", check_relevance, {"extractor": "extractor", "scraper": "scraper", END: END})
 
     workflow.add_edge("extractor", "validator")
 
     # Conditional logic after validation
     def check_validation(state: AgentState):
-        if state["is_valid"]:
+        if state.get("is_valid"):
             return "storage"
         else:
-            # If invalid, we could route back to extractor for correction, but for now we'll just end or log
-            return END
+            # If invalid, we could route back to extractor for correction, but for now we'll just move to next URL
+            return route_after_processing(state)
 
-    workflow.add_conditional_edges("validator", check_validation, {"storage": "storage", END: END})
+    workflow.add_conditional_edges("validator", check_validation, {"storage": "storage", "scraper": "scraper", END: END})
     
-    workflow.add_edge("storage", END)
+    workflow.add_conditional_edges("storage", route_after_processing, {"scraper": "scraper", END: END})
 
     workflow.set_entry_point("planner")
 

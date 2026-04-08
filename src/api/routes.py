@@ -1,17 +1,21 @@
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
+import json
+import asyncio
 
 from src.db.session import get_db_session
 from src.models.relational import Tenant, Site, DataSource
 from src.api.schemas import PipelineConfig
 from src.api.auth import get_current_tenant
 from src.agents.workflow import build_acquisition_graph
+from src.api.events import event_manager
 
 router = APIRouter()
 
-def run_acquisition_workflow(site_id: str, niche: str, ontology: dict):
+async def run_acquisition_workflow(site_id: str, niche: str, ontology: dict):
     # Initialize the graph
     graph = build_acquisition_graph()
     
@@ -36,13 +40,48 @@ def run_acquisition_workflow(site_id: str, niche: str, ontology: dict):
     }
     
     # Run the graph
-    # In a real app, we'd stream this or save state to DB
     try:
-        for output in graph.stream(state):
-            # Log progress or save to DB
-            print(f"Workflow step completed: {list(output.keys())}")
+        await event_manager.publish(site_id, {"type": "log", "message": f"Starting acquisition for niche: {niche}"})
+        
+        # Use astream instead of stream for async
+        async for output in graph.astream(state):
+            node_name = list(output.keys())[0]
+            node_state = output[node_name]
+            
+            # Publish queue updates based on searcher output
+            if node_name == "searcher":
+                if "urls_to_scrape" in node_state:
+                    queue_items = [{"url": url, "status": "queued", "type": "Web"} for url in node_state["urls_to_scrape"]]
+                    await event_manager.publish(site_id, {"type": "queue", "data": queue_items})
+            
+            # Publish new data event to instantly update the frontend Vault
+            elif node_name == "storage":
+                if node_state.get('extracted_entities') or node_state.get('extracted_relationships'):
+                    await event_manager.publish(site_id, {
+                        "type": "new_data", 
+                        "entities": node_state.get('extracted_entities', []), 
+                        "relationships": node_state.get('extracted_relationships', [])
+                    })
+                
+        await event_manager.publish(site_id, {"type": "log", "message": "Workflow completed successfully."})
     except Exception as e:
+        await event_manager.publish(site_id, {"type": "log", "message": f"Workflow failed: {str(e)}"})
         print(f"Workflow failed: {e}")
+
+@router.get("/pipelines/{site_id}/logs")
+async def stream_pipeline_logs(site_id: str, request: Request):
+    async def event_generator():
+        q = event_manager.subscribe(site_id)
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                event = await q.get()
+                yield f"data: {json.dumps(event)}\n\n"
+        finally:
+            event_manager.unsubscribe(site_id, q)
+            
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @router.post("/pipelines/{site_id}/acquire", status_code=202)
 async def trigger_acquisition(
