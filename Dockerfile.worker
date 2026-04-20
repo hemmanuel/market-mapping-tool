@@ -1,0 +1,17 @@
+FROM vllm/vllm-openai:latest
+
+WORKDIR /app
+
+# Install python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY src/ ./src/
+
+# Set Python path so src modules can be imported
+ENV PYTHONPATH=/app
+
+# Run the worker
+ENTRYPOINT ["python3"]
+CMD ["src/workers/gpu_worker.py"]
