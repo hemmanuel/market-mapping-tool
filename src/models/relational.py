@@ -17,28 +17,30 @@ class Tenant(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     
-    sites: Mapped[List["Site"]] = relationship(back_populates="tenant", cascade="all, delete-orphan")
+    sites: Mapped[List["Site"]] = relationship(back_populates="tenant")
 
 
 class Site(Base):
     __tablename__ = "sites"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"))
+    tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id"))
     name: Mapped[str] = mapped_column(String(255), nullable=False) # e.g., "Solid State Batteries"
     description: Mapped[Optional[str]] = mapped_column(Text)
     ontology: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    graph_status: Mapped[str] = mapped_column(String(50), default="idle")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     tenant: Mapped["Tenant"] = relationship(back_populates="sites")
-    data_sources: Mapped[List["DataSource"]] = relationship(back_populates="site", cascade="all, delete-orphan")
+    data_sources: Mapped[List["DataSource"]] = relationship(back_populates="site")
+    pending_documents: Mapped[List["PendingDocument"]] = relationship(back_populates="site")
 
 
 class DataSource(Base):
     __tablename__ = "data_sources"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    site_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("sites.id", ondelete="CASCADE"))
+    site_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("sites.id"))
     
     # Dynamic identifier: "rss", "api_endpoint", "s3_bucket", "user_upload"
     source_type: Mapped[str] = mapped_column(String(100), nullable=False) 
@@ -60,21 +62,33 @@ class DataSource(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     site: Mapped["Site"] = relationship(back_populates="data_sources")
-    documents: Mapped[List["Document"]] = relationship(back_populates="data_source", cascade="all, delete-orphan")
+    documents: Mapped[List["Document"]] = relationship(back_populates="data_source")
 
 
 class Document(Base):
     __tablename__ = "documents"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    data_source_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("data_sources.id", ondelete="CASCADE"))
+    data_source_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("data_sources.id"))
     title: Mapped[Optional[str]] = mapped_column(String(512))
     raw_text: Mapped[str] = mapped_column(Text, nullable=False)
     
-    # Using an embedding dimension of 768 to match Google's text-embedding-004.
-    embedding: Mapped[Optional[list[float]]] = mapped_column(Vector(768)) 
+    # Using an embedding dimension of 3072 to match Google's gemini-embedding-001.
+    embedding: Mapped[Optional[list[float]]] = mapped_column(Vector(3072)) 
     
     metadata_json: Mapped[Optional[dict]] = mapped_column(JSONB)
     processed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
     data_source: Mapped["DataSource"] = relationship(back_populates="documents")
+
+class PendingDocument(Base):
+    __tablename__ = "pending_documents"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    site_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("sites.id"))
+    url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    estimated_size: Mapped[int] = mapped_column(nullable=False)
+    status: Mapped[str] = mapped_column(String(50), default="pending")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    site: Mapped["Site"] = relationship(back_populates="pending_documents")

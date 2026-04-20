@@ -1,0 +1,23 @@
+Plan 1: The Infrastructure Pivot (The Local Engine)
+Goal: Rip out Ollama, install vLLM, and prove that your RTX 5090 can process chunks at lightning speed using an OpenAI-compatible local endpoint.
+
+Step 1: Update docker-compose.yml to remove Ollama and add the vllm/vllm-openai container, configured for your 32GB VRAM.
+Step 2: Update src/agents/graph_worker.py to swap the Gemini extraction call for a ChatOpenAI call pointing to your local http://localhost:8000/v1 vLLM endpoint.
+Step 3: Crank the concurrency semaphore to 50+ and run a test to verify the GPU utilization spikes and the chunks process successfully.
+Why do this first? It establishes the baseline compute power. We need to know the engine works before we start giving it more complex instructions.
+Plan 2: The "Paper Trail" (Primary Source Verification)
+Goal: Eliminate the "LLM vibes" from the extraction phase and force the system to cite its sources.
+
+Step 1: Update the GraphExtraction Pydantic schemas in graph_worker.py to require an exact_quote field.
+Step 2: Rewrite the extraction system prompt to strictly enforce quoting the text.
+Step 3: Update the Neo4j Cypher queries to save the exact_quote and source_url as properties on the relationship edges.
+Step 4: Update the /graph API endpoint in routes.py to return these quotes to the frontend, and roll up the raw relationships to the Canonical nodes.
+Plan 3: The Smart Ingestion Pipeline (Information Foraging)
+Goal: Rewrite the LangGraph workflow so the system autonomously hunts for high-density data.
+
+Step 1: Rewrite planner_node in nodes.py to use the "Multi-Vector Search" JSON schema (intent, queries, expected yield).
+Step 2: Implement the Feedback Loop logic so the planner adjusts its search operators if the scraper returns low-quality HTML.
+Step 3: Rewrite the bouncer_node to replace the subjective LLM "vibe check" with a fast, deterministic keyword/entity density check.
+By splitting it this way, we ensure that each phase is independently testable. We get the engine running fast (Plan 1), we make it accurate and verifiable (Plan 2), and then we make it hunt for the best data (Plan 3).
+
+Whenever you are ready, switch me to Agent mode, and we can generate and execute "Plan 1" to get vLLM running!

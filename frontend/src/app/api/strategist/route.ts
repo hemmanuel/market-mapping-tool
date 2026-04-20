@@ -25,7 +25,7 @@ CRITICAL INSTRUCTIONS:
 4. Do NOT mention the SYSTEM_AUTO_PROMPT string in your response.`;
 
   const result = await streamText({
-    model: google('gemini-3.1-pro-preview'),
+    model: google('gemini-3-flash-preview'),
     system: systemPrompt,
     messages,
   });
