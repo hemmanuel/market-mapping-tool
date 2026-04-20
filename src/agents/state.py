@@ -12,9 +12,17 @@ class AgentState(TypedDict):
     
     # Execution State
     search_queries: List[SearchQuery]
+    search_attempts: int
+    target_urls: int
+    max_search_attempts: int
     urls_to_scrape: List[str]
+    cached_urls: List[str]
     current_url: Optional[str]
     raw_text: Optional[str]
+    storage_object: Optional[str]
+    ignore_size_limit: Optional[bool]
+    search_feedback: List[str]
+    relevant_urls_count: int
     
     # Validation State
     is_relevant: bool

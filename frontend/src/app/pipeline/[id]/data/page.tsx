@@ -1,13 +1,13 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useChat } from "ai/react";
 import ReactMarkdown from "react-markdown";
 import { useAuth } from "@clerk/nextjs";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Play, RefreshCw, Database, Activity, CheckCircle2, AlertCircle, Bot, Terminal, Square } from "lucide-react";
+import { Play, RefreshCw, Database, Activity, CheckCircle2, AlertCircle, Bot, Terminal, Square, Search, ExternalLink, Download } from "lucide-react";
 
 // Add global type for Clerk
 declare global {
@@ -19,16 +19,25 @@ declare global {
 
 export default function DataCommandCenter() {
   const params = useParams();
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const pipelineId = params.id as string;
 
   const [isAcquiring, setIsAcquiring] = useState(false);
+  const [isGeneratingGraph, setIsGeneratingGraph] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
+  const [graphStatus, setGraphStatus] = useState<string>("");
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [entities, setEntities] = useState<any[]>([]);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [relationships, setRelationships] = useState<any[]>([]);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const [chunks, setChunks] = useState<any[]>([]);
+  const [totalChunks, setTotalChunks] = useState(0);
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [queue, setQueue] = useState<any[]>([]);
+  const [pendingDocs, setPendingDocs] = useState<any[]>([]);
   const [logs, setLogs] = useState<string[]>([]);
   
   const hasStartedAcquisition = useRef(false);
@@ -52,11 +61,13 @@ export default function DataCommandCenter() {
   useEffect(() => {
     if (!hasStartedAcquisition.current) {
       hasStartedAcquisition.current = true;
-      // We need to wait for Clerk to be ready, but getToken is async and safe to call
-      startAcquisition();
+      // Only auto-start if the query parameter is present (coming from the onboarding wizard)
+      if (searchParams.get("autoStart") === "true") {
+        startAcquisition();
+      }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pipelineId]);
+  }, [pipelineId, searchParams]);
 
   // Auto-scroll logs
   useEffect(() => {
@@ -104,6 +115,77 @@ export default function DataCommandCenter() {
     }
   };
 
+  const generateGraph = async () => {
+    setIsGeneratingGraph(true);
+    try {
+      const token = await getToken();
+      const headers: Record<string, string> = {};
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+
+      const res = await fetch(`http://localhost:8000/api/v1/pipelines/${pipelineId}/generate-graph`, {
+        method: 'POST',
+        headers
+      });
+      if (!res.ok) throw new Error("Failed to start graph generation");
+      router.push(`/pipeline/${pipelineId}/graph-progress`);
+    } catch (error) {
+      console.error(error);
+      alert("Failed to start graph generation.");
+      setIsGeneratingGraph(false);
+    }
+  };
+
+  const stopGraphGeneration = async () => {
+    try {
+      const token = await getToken();
+      const headers: Record<string, string> = {};
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+
+      const res = await fetch(`http://localhost:8000/api/v1/pipelines/${pipelineId}/cancel-graph`, {
+        method: 'POST',
+        headers
+      });
+      if (!res.ok) throw new Error("Failed to stop graph generation");
+      setIsGeneratingGraph(false);
+    } catch (error) {
+      console.error(error);
+      alert("Failed to stop graph generation.");
+    }
+  };
+
+  const handleExport = async () => {
+    setIsExporting(true);
+    try {
+      const token = await getToken();
+      const headers: Record<string, string> = {};
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+
+      const res = await fetch(`http://localhost:8000/api/v1/pipelines/${pipelineId}/export`, { headers });
+      if (!res.ok) throw new Error("Failed to export graph");
+
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `graph_export_${pipelineId}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error(error);
+      alert("Failed to export graph.");
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
   const fetchExplorerData = async () => {
     try {
       const token = await getToken();
@@ -112,16 +194,57 @@ export default function DataCommandCenter() {
         headers['Authorization'] = `Bearer ${token}`;
       }
 
-      const res = await fetch(`http://localhost:8000/api/v1/pipelines/${pipelineId}/entities`, {
-        headers
-      });
-      if (res.ok) {
-        const data = await res.json();
+      const [resEntities, resDocs, resPending] = await Promise.all([
+        fetch(`http://localhost:8000/api/v1/pipelines/${pipelineId}/entities`, { headers }),
+        fetch(`http://localhost:8000/api/v1/pipelines/${pipelineId}/documents`, { headers }),
+        fetch(`http://localhost:8000/api/v1/pipelines/${pipelineId}/pending-documents`, { headers })
+      ]);
+
+      if (resEntities.ok) {
+        const data = await resEntities.json();
         setEntities(data.entities || []);
         setRelationships(data.relationships || []);
       }
+      
+      if (resDocs.ok) {
+        const data = await resDocs.json();
+        setChunks(data.chunks || []);
+        setTotalChunks(data.total_chunks || 0);
+      }
+
+      if (resPending.ok) {
+        const data = await resPending.json();
+        setPendingDocs(data || []);
+      }
     } catch (error) {
       console.error("Failed to fetch explorer data", error);
+    }
+  };
+
+  const handleProcessPending = async (docId: string, action: string, charLimit?: number) => {
+    try {
+      const token = await getToken();
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json'
+      };
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+
+      const res = await fetch(`http://localhost:8000/api/v1/pipelines/${pipelineId}/pending-documents/${docId}/process`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ action, char_limit: charLimit })
+      });
+
+      if (res.ok) {
+        // Remove from UI immediately
+        setPendingDocs(prev => prev.filter(d => d.id !== docId));
+      } else {
+        alert("Failed to process document");
+      }
+    } catch (error) {
+      console.error("Failed to process document", error);
     }
   };
 
@@ -145,6 +268,10 @@ export default function DataCommandCenter() {
           }
         } else if (data.type === 'queue') {
           setQueue(data.data);
+        } else if (data.type === 'queue_update') {
+          setQueue(prev => prev.map(item => 
+            item.url === data.url ? { ...item, status: data.status } : item
+          ));
         } else if (data.type === 'new_data') {
           if (data.entities && data.entities.length > 0) {
             setEntities(prev => [...prev, ...data.entities]);
@@ -152,6 +279,15 @@ export default function DataCommandCenter() {
           if (data.relationships && data.relationships.length > 0) {
             setRelationships(prev => [...prev, ...data.relationships]);
           }
+        } else if (data.type === 'new_chunk') {
+          setChunks(prev => [data.data, ...prev]);
+          setTotalChunks(prev => prev + 1);
+        } else if (data.type === 'large_file_pending') {
+          fetchExplorerData(); // Refresh pending docs
+        } else if (data.type === 'graph_progress') {
+          setIsGeneratingGraph(data.current_phase !== 'Complete' && data.current_phase !== 'Error');
+          setGraphStatus(data.message);
+          setLogs(prev => [...prev, `[${new Date().toLocaleTimeString()}] [Graph] ${data.message}`]);
         }
       } catch (err) {
         console.error("Failed to parse SSE message", err);
@@ -173,6 +309,9 @@ export default function DataCommandCenter() {
       {/* Header */}
       <header className="flex items-center justify-between p-4 bg-white border-b border-slate-200">
         <div className="flex items-center gap-3">
+          <Button variant="ghost" size="sm" onClick={() => router.push("/dashboard")} className="mr-2 text-slate-500 hover:text-slate-700">
+            &larr; Dashboard
+          </Button>
           <Database className="w-6 h-6 text-blue-600" />
           <h1 className="text-xl font-bold">Data Command Center</h1>
           <Badge variant="outline" className="ml-2 bg-slate-100 text-slate-600">Pipeline: {pipelineId.slice(0, 8)}...</Badge>
@@ -196,6 +335,35 @@ export default function DataCommandCenter() {
               <Play className="w-4 h-4 mr-2" /> Start Acquisition
             </Button>
           )}
+          {isGeneratingGraph ? (
+            <Button 
+              onClick={stopGraphGeneration} 
+              variant="destructive"
+            >
+              <Square className="w-4 h-4 mr-2 fill-current" /> Stop Generation
+            </Button>
+          ) : (
+            <Button 
+              onClick={generateGraph} 
+              disabled={isAcquiring || totalChunks === 0}
+              className="bg-purple-600 hover:bg-purple-700"
+            >
+              <Database className="w-4 h-4 mr-2" /> Generate Graph
+            </Button>
+          )}
+          <Button 
+            onClick={handleExport} 
+            disabled={isExporting || totalChunks === 0}
+            variant="outline"
+            className="border-slate-300 text-slate-700 hover:bg-slate-50"
+          >
+            {isExporting ? (
+              <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
+            ) : (
+              <Download className="w-4 h-4 mr-2" />
+            )}
+            {isExporting ? "Exporting..." : "Export Gephi CSV"}
+          </Button>
         </div>
       </header>
 
@@ -250,7 +418,7 @@ export default function DataCommandCenter() {
                 placeholder="Discuss data sources..."
                 onChange={handleInputChange}
               />
-              <Button type="submit" disabled={!input.trim()}>Send</Button>
+              <Button type="submit" disabled={!input?.trim()}>Send</Button>
             </form>
           </div>
         </div>
@@ -259,7 +427,34 @@ export default function DataCommandCenter() {
         <div className="w-1/3 flex flex-col border-r border-slate-200 bg-white">
           {/* Top Half: URL Queue */}
           <div className="flex flex-col h-1/2 border-b border-slate-200">
-            <div className="p-4 border-b border-slate-200 bg-slate-50 font-semibold text-sm text-slate-700 flex items-center gap-2">
+            {pendingDocs.length > 0 && (
+              <div className="p-4 border-b border-amber-200 bg-amber-50 shrink-0">
+                <div className="font-semibold text-sm text-amber-800 flex items-center gap-2 mb-3">
+                  <AlertCircle className="w-4 h-4" /> Requires Attention: Large Files
+                </div>
+                <div className="space-y-3 max-h-48 overflow-y-auto">
+                  {pendingDocs.map(doc => (
+                    <div key={doc.id} className="bg-white p-3 rounded border border-amber-200 shadow-sm">
+                      <a href={doc.url} target="_blank" rel="noopener noreferrer" className="text-xs font-medium truncate mb-1 block hover:underline text-blue-600" title={doc.url}>
+                        {doc.url}
+                      </a>
+                      <div className="text-xs text-slate-500 mb-3">Estimated size: {(doc.estimated_size / 1000).toFixed(1)}k chars</div>
+                      <div className="flex gap-2">
+                        <Button size="sm" variant="outline" onClick={() => handleProcessPending(doc.id, 'skip')} className="text-xs h-7">Skip</Button>
+                        <Button size="sm" variant="outline" onClick={() => {
+                          const limit = prompt("Enter character limit (e.g. 50000):", "50000");
+                          if (limit && !isNaN(parseInt(limit))) {
+                            handleProcessPending(doc.id, 'extract_partial', parseInt(limit));
+                          }
+                        }} className="text-xs h-7">Extract First X Chars</Button>
+                        <Button size="sm" className="bg-amber-600 hover:bg-amber-700 text-white text-xs h-7" onClick={() => handleProcessPending(doc.id, 'extract_all')}>Extract All</Button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            <div className="p-4 border-b border-slate-200 bg-slate-50 font-semibold text-sm text-slate-700 flex items-center gap-2 shrink-0">
               <Activity className="w-4 h-4" /> URL Queue
             </div>
             <div className="flex-1 overflow-y-auto p-4">
@@ -267,14 +462,17 @@ export default function DataCommandCenter() {
                 {queue.map((item, idx) => (
                   <div key={idx} className="flex items-center justify-between p-3 border border-slate-100 rounded-lg bg-slate-50">
                     <div className="flex flex-col">
-                      <span className="text-sm font-medium truncate w-48" title={item.url}>{item.url}</span>
+                      <a href={item.url} target="_blank" rel="noopener noreferrer" className="text-sm font-medium truncate w-48 hover:underline text-blue-600" title={item.url}>
+                        {item.url}
+                      </a>
                       <span className="text-xs text-slate-500 mt-1">{item.type}</span>
                     </div>
                     <div className="flex items-center gap-2">
                       {item.status === 'completed' && <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100 border-emerald-200"><CheckCircle2 className="w-3 h-3 mr-1" /> Done</Badge>}
                       {item.status === 'extracting' && <Badge className="bg-blue-100 text-blue-700 hover:bg-blue-100 border-blue-200"><RefreshCw className="w-3 h-3 mr-1 animate-spin" /> Extracting</Badge>}
+                      {item.status === 'evaluating' && <Badge className="bg-amber-100 text-amber-700 hover:bg-amber-100 border-amber-200"><Search className="w-3 h-3 mr-1 animate-pulse" /> Evaluating</Badge>}
                       {item.status === 'queued' && <Badge className="bg-slate-200 text-slate-700 hover:bg-slate-200 border-slate-300">Queued</Badge>}
-                      {item.status === 'failed' && <Badge className="bg-red-100 text-red-700 hover:bg-red-100 border-red-200"><AlertCircle className="w-3 h-3 mr-1" /> Failed</Badge>}
+                      {item.status === 'failed' && <Badge className="bg-red-100 text-red-700 hover:bg-red-100 border-red-200"><AlertCircle className="w-3 h-3 mr-1" /> Failed/Rejected</Badge>}
                     </div>
                   </div>
                 ))}
@@ -304,48 +502,59 @@ export default function DataCommandCenter() {
 
         {/* Column 3: The Vault */}
         <div className="w-1/3 flex flex-col bg-slate-50">
-          <div className="p-4 border-b border-slate-200 bg-white font-semibold text-sm text-slate-700 flex items-center gap-2">
-            <Database className="w-4 h-4" /> Knowledge Graph Explorer
+          <div className="p-4 border-b border-slate-200 bg-white font-semibold text-sm text-slate-700 flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Database className="w-4 h-4" /> Semantic Corpus Viewer
+            </div>
+            <div className="flex items-center gap-2">
+              <Button 
+                variant="outline" 
+                size="sm" 
+                className="h-7 text-xs"
+                disabled={isAcquiring || totalChunks === 0}
+                onClick={() => router.push(`/pipeline/${pipelineId}/explorer`)}
+              >
+                <ExternalLink className="w-3 h-3 mr-1" /> Data Explorer
+              </Button>
+              <Button 
+                variant="outline" 
+                size="sm" 
+                className="h-7 text-xs border-purple-200 text-purple-700 hover:bg-purple-50"
+                disabled={entities.length === 0}
+                onClick={() => router.push(`/pipeline/${pipelineId}/graph`)}
+              >
+                <Database className="w-3 h-3 mr-1" /> View Graph
+              </Button>
+              <Badge variant="secondary" className="bg-blue-100 text-blue-700">
+                {totalChunks} Chunks
+              </Badge>
+            </div>
           </div>
-          <div className="flex-1 overflow-y-auto p-6">
-            
-            <div className="mb-8">
-              <h3 className="text-lg font-semibold mb-4">Extracted Entities ({entities.length})</h3>
-              {entities.length === 0 ? (
-                <div className="text-center p-8 border border-dashed border-slate-300 rounded-lg text-slate-500">
-                  No entities extracted yet. Start acquisition to populate the graph.
-                </div>
-              ) : (
-                <div className="grid grid-cols-2 gap-4">
-                  {entities.map((ent, i) => (
-                    <div key={i} className="p-3 bg-white border border-slate-200 rounded-lg shadow-sm">
-                      <div className="font-medium text-sm">{ent.name}</div>
-                      <Badge variant="outline" className="mt-2 text-xs">{ent.type}</Badge>
+          <div className="flex-1 overflow-y-auto p-4">
+            {chunks.length === 0 ? (
+              <div className="text-center p-8 border border-dashed border-slate-300 rounded-lg text-slate-500">
+                No data ingested yet. Start acquisition to populate the vector database.
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {chunks.map((chunk, i) => (
+                  <div key={i} className="p-4 bg-white border border-slate-200 rounded-lg shadow-sm">
+                    <div className="text-xs text-slate-500 mb-2 font-mono truncate" title={chunk.source_url || chunk.source}>
+                      {chunk.source_url ? (
+                        <a href={chunk.source_url} target="_blank" rel="noopener noreferrer" className="hover:underline text-blue-600">
+                          {chunk.source_url}
+                        </a>
+                      ) : (
+                        chunk.source || "Unknown Source"
+                      )}
                     </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            <div>
-              <h3 className="text-lg font-semibold mb-4">Extracted Relationships ({relationships.length})</h3>
-              {relationships.length === 0 ? (
-                <div className="text-center p-8 border border-dashed border-slate-300 rounded-lg text-slate-500">
-                  No relationships extracted yet.
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  {relationships.map((rel, i) => (
-                    <div key={i} className="flex items-center gap-3 p-3 bg-white border border-slate-200 rounded-lg shadow-sm text-sm">
-                      <span className="font-medium text-blue-700">{rel.source}</span>
-                      <span className="text-slate-400 font-mono text-xs bg-slate-100 px-2 py-1 rounded">-[{rel.type}]-&gt;</span>
-                      <span className="font-medium text-emerald-700">{rel.target}</span>
+                    <div className="text-sm text-slate-800 leading-relaxed">
+                      {chunk.text_snippet}
                     </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       </div>

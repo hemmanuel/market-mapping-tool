@@ -8,15 +8,17 @@ from docx import Document
 from pptx import Presentation
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
-from bs4 import BeautifulSoup
+from newspaper import Article
 import httpx
 from pydantic import BaseModel, Field
+import uuid
 
 from src.agents.state import AgentState, SearchQuery
 from src.db.neo4j_session import driver
 from src.api.events import event_manager
 from src.db.session import AsyncSessionLocal
-from src.models.relational import DataSource, Document as PGDocument
+from src.models.relational import DataSource, Document as PGDocument, PendingDocument
+from src.services.storage import storage
 from sqlalchemy.future import select
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
@@ -24,25 +26,52 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from langchain_ollama import ChatOllama
+
 # Initialize LLM and Embeddings
-llm = ChatGoogleGenerativeAI(model="gemini-3.1-pro-preview", api_key=os.getenv("GEMINI_API_KEY"))
-embeddings = GoogleGenerativeAIEmbeddings(model="text-embedding-004", google_api_key=os.getenv("GEMINI_API_KEY"))
+llm = ChatGoogleGenerativeAI(model="gemini-3-flash-preview", api_key=os.getenv("GEMINI_API_KEY"))
+ollama_llm = ChatOllama(model="llama3.1", base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"), temperature=0)
+embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001", google_api_key=os.getenv("GEMINI_API_KEY"))
 
 # Models for structured output
+class SearchVector(BaseModel):
+    intent: str = Field(description="The intent of this search vector (e.g., 'Discover Technical Whitepapers')")
+    queries: List[str] = Field(description="List of specific search queries for this intent")
+    expected_yield: str = Field(description="What kind of data this vector is expected to yield")
+
 class PlannerOutput(BaseModel):
-    queries: List[SearchQuery] = Field(description="List of search queries and target domains")
+    search_vectors: List[SearchVector] = Field(description="List of search vectors")
 
 class BouncerOutput(BaseModel):
     is_relevant: bool = Field(description="Whether the text is relevant to the niche")
     reason: str = Field(description="Reason for relevance or irrelevance")
 
 async def planner_node(state: AgentState) -> AgentState:
-    """Generates search queries based on the niche and schema."""
+    """Generates search queries based on the niche and schema using Multi-Vector Search."""
     pipeline_id = state["pipeline_id"]
-    await event_manager.publish(pipeline_id, {"type": "log", "message": f"[Planner] Analyzing niche: {state['niche']}"})
+    attempts = state.get("search_attempts", 0)
+    target_urls = state.get("target_urls", 200)
+    current_url_count = len(state.get("urls_to_scrape", []))
+    search_feedback = state.get("search_feedback", [])
     
+    await event_manager.publish(pipeline_id, {"type": "log", "message": f"[Planner] Analyzing niche: {state['niche']} (Attempt {attempts + 1})"})
+    
+    feedback_text = ""
+    if search_feedback:
+        feedback_text = "\n\nFEEDBACK FROM PREVIOUS ATTEMPTS:\n" + "\n".join(search_feedback) + "\n\nAdjust your strategy based on this feedback. If previous searches yielded low-quality data, pivot to different filetypes or domains."
+
+    system_prompt = f"""You are a Master Sourcing Strategist. Your goal is to find the highest-density, most authoritative data sources for the user's specific market niche and ontology.
+
+Think critically about where this specific type of data lives:
+- If the user wants financial data or market sizing, target `filetype:xls`, `filetype:csv`, or SEC EDGAR.
+- If the user wants supply chain or technical specs, target `filetype:pdf` (whitepapers, patents, technical manuals).
+- If the user wants startup funding or M&A, target `filetype:pdf` or `filetype:pptx` (pitch decks, investor relations).
+- If the user wants real-time sentiment or product launches, target standard HTML (news, press releases).
+
+Generate highly targeted search vectors. Use advanced Google operators (`filetype:`, `site:`, `intitle:`) strategically based on the ontology.{feedback_text}"""
+
     prompt = ChatPromptTemplate.from_messages([
-        ("system", "You are a Sourcing Strategist. Generate highly targeted search queries to find information about the given niche and schema. Target specific domains like prnewswire.com, techcrunch.com, etc. Occasionally append filetype operators (e.g., filetype:pdf, filetype:pptx, filetype:xlsx) to actively hunt for industry reports, presentations, and datasets."),
+        ("system", system_prompt),
         ("user", "Niche: {niche}\nEntities: {schema_entities}\nRelationships: {schema_relationships}")
     ])
     
@@ -53,15 +82,19 @@ async def planner_node(state: AgentState) -> AgentState:
         "schema_relationships": state["schema_relationships"]
     })
     
-    for q in result.queries:
-        await event_manager.publish(pipeline_id, {"type": "log", "message": f"[Planner] Generated query: '{q['query']}'"})
+    flat_queries = []
+    for vector in result.search_vectors:
+        await event_manager.publish(pipeline_id, {"type": "log", "message": f"[Planner] Intent: {vector.intent} (Expected: {vector.expected_yield})"})
+        for q in vector.queries:
+            await event_manager.publish(pipeline_id, {"type": "log", "message": f"[Planner] Generated query: '{q}'"})
+            flat_queries.append({"query": q, "target_domains": []})
     
-    return {**state, "search_queries": result.queries}
+    return {**state, "search_queries": flat_queries, "search_attempts": attempts + 1}
 
 async def search_node(state: AgentState) -> AgentState:
     """Executes searches to find URLs using Serper.dev."""
     pipeline_id = state["pipeline_id"]
-    urls = []
+    urls = list(state.get("urls_to_scrape", []))
     
     serper_api_key = os.getenv("SERPER_API_KEY")
     if not serper_api_key:
@@ -114,6 +147,86 @@ async def search_node(state: AgentState) -> AgentState:
     await event_manager.publish(pipeline_id, {"type": "log", "message": f"[Searcher] Total unique URLs queued: {len(unique_urls)}"})
     return {**state, "urls_to_scrape": unique_urls}
 
+async def global_dedup_node(state: AgentState) -> AgentState:
+    """Checks the database for existing URLs to avoid re-scraping and re-embedding."""
+    pipeline_id = state["pipeline_id"]
+    urls = state.get("urls_to_scrape", [])
+    if not urls:
+        return {**state, "cached_urls": []}
+    
+    await event_manager.publish(pipeline_id, {"type": "log", "message": "[GlobalDedup] Checking global cache for existing URLs..."})
+    
+    cached_urls = []
+    urls_to_scrape = list(urls)
+    stored_chunks = 0
+    
+    async with AsyncSessionLocal() as session:
+        try:
+            # Find which URLs exist in the DB
+            result = await session.execute(
+                select(PGDocument)
+                .where(PGDocument.metadata_json["source_url"].astext.in_(urls))
+                .order_by(PGDocument.metadata_json["source_url"].astext, PGDocument.metadata_json["chunk_index"].astext)
+            )
+            existing_docs = result.scalars().all()
+            
+            if existing_docs:
+                # Group by URL
+                docs_by_url = {}
+                for doc in existing_docs:
+                    url = doc.metadata_json.get("source_url")
+                    if url:
+                        if url not in docs_by_url:
+                            docs_by_url[url] = []
+                        docs_by_url[url].append(doc)
+                
+                # Process cached URLs
+                if docs_by_url:
+                    # Get or create data source
+                    ds_result = await session.execute(select(DataSource).where(DataSource.site_id == pipeline_id).limit(1))
+                    data_source = ds_result.scalars().first()
+                    
+                    if not data_source:
+                        data_source = DataSource(
+                            site_id=pipeline_id,
+                            source_type="web_search",
+                            name="Autonomous Web Search",
+                            config={}
+                        )
+                        session.add(data_source)
+                        await session.flush()
+                    
+                    for url, docs in docs_by_url.items():
+                        await event_manager.publish(pipeline_id, {"type": "log", "message": f"[GlobalDedup] Cache hit for {url}. Copying {len(docs)} chunks..."})
+                        for doc in docs:
+                            new_doc = PGDocument(
+                                data_source_id=data_source.id,
+                                title=doc.title,
+                                raw_text=doc.raw_text,
+                                embedding=doc.embedding,
+                                metadata_json=doc.metadata_json
+                            )
+                            session.add(new_doc)
+                            stored_chunks += 1
+                        
+                        cached_urls.append(url)
+                        if url in urls_to_scrape:
+                            urls_to_scrape.remove(url)
+                            
+                    await session.commit()
+                    await event_manager.publish(pipeline_id, {"type": "log", "message": f"[GlobalDedup] Cloned {stored_chunks} cached chunks."})
+        except Exception as e:
+            await session.rollback()
+            await event_manager.publish(pipeline_id, {"type": "log", "message": f"[GlobalDedup] Database error: {e}"})
+            print(f"Database error in GlobalDedup: {e}")
+            
+    return {
+        **state,
+        "urls_to_scrape": urls_to_scrape,
+        "cached_urls": cached_urls,
+        "stored_chunks": state.get("stored_chunks", 0) + stored_chunks
+    }
+
 async def scrape_node(state: AgentState) -> AgentState:
     """Downloads text from a URL, handling multiple formats."""
     pipeline_id = state["pipeline_id"]
@@ -124,6 +237,18 @@ async def scrape_node(state: AgentState) -> AgentState:
     # Pop the first URL to process
     current_url = urls.pop(0)
     raw_text = ""
+    storage_object = None
+    
+    # Known problematic domains that consistently block scrapers and Jina
+    SKIP_DOMAINS = [
+        "bloomberg.com", "wsj.com", "forbes.com", "businesswire.com", 
+        "linkedin.com", "ft.com", "sec.gov", "spglobal.com", 
+        "pitchbook.com", "reuters.com", "cnbc.com", "nytimes.com"
+    ]
+    
+    if any(domain in current_url.lower() for domain in SKIP_DOMAINS):
+        await event_manager.publish(pipeline_id, {"type": "log", "message": f"[Scraper] Pre-emptively skipping known problematic domain: {current_url}"})
+        return {**state, "urls_to_scrape": urls, "current_url": current_url, "raw_text": "", "storage_object": None}
     
     await event_manager.publish(pipeline_id, {"type": "log", "message": f"[Scraper] Attempting to download: {current_url}"})
     
@@ -133,17 +258,34 @@ async def scrape_node(state: AgentState) -> AgentState:
         }
         
         async with httpx.AsyncClient() as client:
-            response = await client.get(current_url, headers=headers, timeout=15.0, follow_redirects=True)
-            response.raise_for_status()
+            is_jina_fallback = False
+            try:
+                response = await client.get(current_url, headers=headers, timeout=15.0, follow_redirects=True)
+                response.raise_for_status()
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code in (401, 403):
+                    await event_manager.publish(pipeline_id, {"type": "log", "message": f"[Scraper] Encountered {e.response.status_code}. Using Jina Reader API fallback..."})
+                    response = await client.get(f"https://r.jina.ai/{current_url}", headers=headers, timeout=30.0, follow_redirects=True)
+                    response.raise_for_status()
+                    is_jina_fallback = True
+                else:
+                    raise e
             
             content_type = response.headers.get("Content-Type", "").lower()
             
-            if "application/pdf" in content_type or current_url.lower().endswith(".pdf"):
+            if is_jina_fallback:
+                await event_manager.publish(pipeline_id, {"type": "log", "message": f"[Scraper] Extracted via Jina Reader API."})
+                raw_text = response.text
+                storage_object = f"{pipeline_id}/{uuid.uuid4()}.html"
+                storage.upload_text(raw_text, storage_object, "text/html")
+            elif "application/pdf" in content_type or current_url.lower().endswith(".pdf"):
                 await event_manager.publish(pipeline_id, {"type": "log", "message": f"[Scraper] Detected PDF document. Extracting text..."})
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
                     tmp.write(response.content)
                     tmp_path = tmp.name
                 try:
+                    storage_object = f"{pipeline_id}/{uuid.uuid4()}.pdf"
+                    storage.upload_file(tmp_path, storage_object, "application/pdf")
                     reader = PdfReader(tmp_path)
                     text_parts = [page.extract_text() for page in reader.pages if page.extract_text()]
                     raw_text = " ".join(text_parts)
@@ -156,6 +298,8 @@ async def scrape_node(state: AgentState) -> AgentState:
                     tmp.write(response.content)
                     tmp_path = tmp.name
                 try:
+                    storage_object = f"{pipeline_id}/{uuid.uuid4()}.docx"
+                    storage.upload_file(tmp_path, storage_object, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
                     doc = Document(tmp_path)
                     raw_text = " ".join([p.text for p in doc.paragraphs])
                 finally:
@@ -167,6 +311,8 @@ async def scrape_node(state: AgentState) -> AgentState:
                     tmp.write(response.content)
                     tmp_path = tmp.name
                 try:
+                    storage_object = f"{pipeline_id}/{uuid.uuid4()}.pptx"
+                    storage.upload_file(tmp_path, storage_object, "application/vnd.openxmlformats-officedocument.presentationml.presentation")
                     prs = Presentation(tmp_path)
                     text_parts = []
                     for slide in prs.slides:
@@ -184,58 +330,101 @@ async def scrape_node(state: AgentState) -> AgentState:
                     tmp_path = tmp.name
                 try:
                     if current_url.lower().endswith(".csv") or "csv" in content_type:
+                        storage_object = f"{pipeline_id}/{uuid.uuid4()}.csv"
+                        storage.upload_file(tmp_path, storage_object, "text/csv")
                         df = pd.read_csv(tmp_path)
                     else:
+                        storage_object = f"{pipeline_id}/{uuid.uuid4()}.xlsx"
+                        storage.upload_file(tmp_path, storage_object, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
                         df = pd.read_excel(tmp_path)
                     raw_text = df.to_string()
                 finally:
                     os.unlink(tmp_path)
                     
             else:
-                # Default to HTML
-                await event_manager.publish(pipeline_id, {"type": "log", "message": f"[Scraper] Detected HTML page. Parsing..."})
-                soup = BeautifulSoup(response.text, 'html.parser')
-                for script in soup(["script", "style", "nav", "footer", "header"]):
-                    script.decompose()
-                raw_text = soup.get_text(separator=' ', strip=True)
+                # Default to HTML using newspaper3k for smart extraction
+                await event_manager.publish(pipeline_id, {"type": "log", "message": f"[Scraper] Detected HTML page. Parsing with newspaper3k..."})
+                storage_object = f"{pipeline_id}/{uuid.uuid4()}.html"
+                storage.upload_text(response.text, storage_object, "text/html")
                 
-            # Truncate to ~15000 chars
-            raw_text = raw_text[:15000]
-            await event_manager.publish(pipeline_id, {"type": "log", "message": f"[Scraper] Successfully extracted {len(raw_text)} characters."})
+                article = Article(current_url)
+                article.set_html(response.text)
+                article.parse()
+                raw_text = article.text
+                
+                if len(raw_text) < 200:
+                    await event_manager.publish(pipeline_id, {"type": "log", "message": f"[Scraper] Extracted text too short (likely paywall/boilerplate). Rejecting."})
+                    raw_text = ""
+                
+            # Check for massive documents
+            if len(raw_text) > 500000 and not state.get("ignore_size_limit"):
+                await event_manager.publish(pipeline_id, {"type": "log", "message": f"[Scraper] WARNING: Document is exceptionally large ({len(raw_text)} chars). Skipping to prevent memory overload."})
+                await event_manager.publish(pipeline_id, {"type": "large_file_pending", "data": {"url": current_url, "estimated_size": len(raw_text)}})
+                
+                async with AsyncSessionLocal() as session:
+                    try:
+                        pending_doc = PendingDocument(
+                            site_id=pipeline_id,
+                            url=current_url,
+                            estimated_size=len(raw_text),
+                            status="pending"
+                        )
+                        session.add(pending_doc)
+                        await session.commit()
+                    except Exception as db_err:
+                        await session.rollback()
+                        print(f"Failed to save PendingDocument: {db_err}")
+                
+                raw_text = "" # Return empty text so bouncer rejects it
+            else:
+                await event_manager.publish(pipeline_id, {"type": "log", "message": f"[Scraper] Successfully extracted {len(raw_text)} characters."})
             
     except Exception as e:
         await event_manager.publish(pipeline_id, {"type": "log", "message": f"[Scraper] Failed to download/parse: {e}"})
         print(f"Failed to scrape {current_url}: {e}")
         raw_text = "" # Return empty text so bouncer rejects it
     
-    return {**state, "urls_to_scrape": urls, "current_url": current_url, "raw_text": raw_text}
+    return {**state, "urls_to_scrape": urls, "current_url": current_url, "raw_text": raw_text, "storage_object": storage_object}
 
 async def bouncer_node(state: AgentState) -> AgentState:
-    """Scores relevance of the text."""
+    """Scores relevance of the text using a fast, deterministic keyword density check."""
     pipeline_id = state["pipeline_id"]
-    await event_manager.publish(pipeline_id, {"type": "log", "message": "[Bouncer] Evaluating text relevance..."})
+    await event_manager.publish(pipeline_id, {"type": "log", "message": "[Bouncer] Evaluating text relevance with keyword density check..."})
     
-    if not state.get("raw_text"):
+    raw_text = state.get("raw_text", "")
+    current_url = state.get("current_url", "unknown_url")
+    search_feedback = state.get("search_feedback", [])
+    
+    if not raw_text:
         await event_manager.publish(pipeline_id, {"type": "log", "message": "[Bouncer] Rejected: No text to evaluate"})
         return {**state, "is_relevant": False, "relevance_reason": "No text to evaluate"}
         
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", "You are a Relevance Bouncer. Determine if the text is relevant to the niche: {niche}."),
-        ("user", "Text: {raw_text}")
-    ])
-    
-    chain = prompt | llm.with_structured_output(BouncerOutput)
-    result = await chain.ainvoke({
-        "niche": state["niche"],
-        "raw_text": state["raw_text"][:2000] # Evaluate first 2000 chars
-    })
-    
-    if result.is_relevant:
-        await event_manager.publish(pipeline_id, {"type": "log", "message": f"[Bouncer] Approved: {result.reason}"})
-    else:
-        await event_manager.publish(pipeline_id, {"type": "log", "message": f"[Bouncer] Rejected: {result.reason}"})
+    if len(raw_text) < 200:
+        await event_manager.publish(pipeline_id, {"type": "log", "message": "[Bouncer] Rejected: Text too short (< 200 chars)"})
+        search_feedback.append(f"URL {current_url} rejected: Text too short (< 200 chars). Likely a paywall, error page, or boilerplate.")
+        return {**state, "is_relevant": False, "relevance_reason": "Text too short", "search_feedback": search_feedback}
         
-    return {**state, "is_relevant": result.is_relevant, "relevance_reason": result.reason}
+    raw_text_lower = raw_text.lower()
+    niche = state.get("niche", "").lower()
+    entities = [e.lower() for e in state.get("schema_entities", [])]
+    
+    # Count occurrences of the niche and schema entities
+    match_count = raw_text_lower.count(niche)
+    for entity in entities:
+        match_count += raw_text_lower.count(entity)
+        
+    if match_count < 3:
+        reason = f"Low density: Found only {match_count} relevant keywords."
+        await event_manager.publish(pipeline_id, {"type": "log", "message": f"[Bouncer] Rejected: {reason}"})
+        search_feedback.append(f"URL {current_url} rejected: {reason}. Try different filetypes or more specific domains.")
+        return {**state, "is_relevant": False, "relevance_reason": reason, "search_feedback": search_feedback}
+        
+    await event_manager.publish(pipeline_id, {"type": "log", "message": f"[Bouncer] Approved: High density (Found {match_count} relevant keywords)."})
+    
+    # Increment relevant URLs count
+    relevant_urls_count = state.get("relevant_urls_count", 0) + 1
+    
+    return {**state, "is_relevant": True, "relevance_reason": f"High density ({match_count} keywords)", "relevant_urls_count": relevant_urls_count}
 
 async def vector_storage_node(state: AgentState) -> AgentState:
     """Chunks text, generates embeddings, and saves to PostgreSQL."""
@@ -275,8 +464,14 @@ async def vector_storage_node(state: AgentState) -> AgentState:
             data_source = result.scalars().first()
             
             if not data_source:
-                await event_manager.publish(pipeline_id, {"type": "log", "message": "[VectorStorage] Error: No DataSource found for this pipeline."})
-                return state
+                data_source = DataSource(
+                    site_id=pipeline_id,
+                    source_type="web_search",
+                    name="Autonomous Web Search",
+                    config={}
+                )
+                session.add(data_source)
+                await session.flush()
                 
             for i, chunk in enumerate(chunks):
                 doc = PGDocument(
@@ -284,13 +479,23 @@ async def vector_storage_node(state: AgentState) -> AgentState:
                     title=f"Extracted from {current_url} (Chunk {i+1})",
                     raw_text=chunk,
                     embedding=chunk_embeddings[i],
-                    metadata_json={"source_url": current_url, "chunk_index": i}
+                    metadata_json={"source_url": current_url, "chunk_index": i, "storage_object": state.get("storage_object")}
                 )
                 session.add(doc)
                 stored_chunks += 1
                 
             await session.commit()
             await event_manager.publish(pipeline_id, {"type": "log", "message": f"[VectorStorage] Saved {stored_chunks} embedded chunks to PostgreSQL."})
+            
+            # Publish new_chunk event for the first chunk to show in the UI
+            if chunks:
+                await event_manager.publish(pipeline_id, {
+                    "type": "new_chunk", 
+                    "data": {
+                        "source": current_url, 
+                        "text_snippet": chunks[0][:200] + "..."
+                    }
+                })
             
         except Exception as e:
             await session.rollback()

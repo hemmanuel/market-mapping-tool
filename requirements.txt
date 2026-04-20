@@ -4,6 +4,7 @@ langchain-community
 langchain-core
 langchain-openai
 langchain-google-genai
+langchain-ollama
 beautifulsoup4
 httpx
 tavily-python
@@ -20,3 +21,9 @@ fastapi
 uvicorn
 pyjwt
 cryptography
+minio
+newspaper3k
+aiohttp
+sentence-transformers
+scikit-learn
+requests
