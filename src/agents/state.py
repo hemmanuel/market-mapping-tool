@@ -10,6 +10,10 @@ class AgentState(TypedDict):
     schema_entities: List[str]
     schema_relationships: List[Dict[str, str]]
     
+    # Discovery State
+    micro_buckets: List[str]
+    discovered_companies: List[str]
+    
     # Execution State
     search_queries: List[SearchQuery]
     search_attempts: int

@@ -163,19 +163,10 @@ async def process_pending_document_worker(site_id: str, doc_id: str, url: str, a
         state["raw_text"] = state["raw_text"][:char_limit]
         await event_manager.publish(site_id, {"type": "log", "message": f"[TargetedWorker] Truncated text to {char_limit} characters."})
         
-    # 2. Bouncer
-    state = await bouncer_node(state)
+    # 2. Bouncer (Bypass for manual extraction)
+    state["is_relevant"] = True
+    state["relevance_reason"] = "Manual extraction bypass"
     
-    if not state.get("is_relevant"):
-        await event_manager.publish(site_id, {"type": "log", "message": f"[TargetedWorker] Document rejected by bouncer: {state.get('relevance_reason')}"})
-        async with AsyncSessionLocal() as session:
-            result = await session.execute(select(PendingDocument).where(PendingDocument.id == doc_id))
-            doc = result.scalars().first()
-            if doc:
-                doc.status = "rejected"
-                await session.commit()
-        return
-        
     # 3. Vector Storage
     state = await vector_storage_node(state)
     
@@ -246,8 +237,8 @@ async def process_pending_document(
     if not doc:
         raise HTTPException(status_code=404, detail="Pending document not found")
         
-    if doc.status != "pending":
-        raise HTTPException(status_code=400, detail="Document is no longer pending")
+    if doc.status not in ["pending", "failed", "rejected", "processing"]:
+        raise HTTPException(status_code=400, detail=f"Document is no longer pending (status: {doc.status})")
 
     doc.status = "processing"
     await db.commit()
@@ -382,6 +373,7 @@ async def cancel_graph_generation(
 @router.get("/pipelines/{site_id}/entities")
 async def get_pipeline_entities(
     site_id: str,
+    theme: Optional[str] = "full",
     db: AsyncSession = Depends(get_db_session),
     user_id: str = Depends(get_current_tenant)
 ):
@@ -402,51 +394,98 @@ async def get_pipeline_entities(
     relationships = []
     
     async with driver.session() as session:
-        # Fetch Top 5000 Relationships and their connected nodes simultaneously
-        result = await session.run(
+        if theme == "documents":
+            query = """
+            // 1. First, guarantee we get EVERY document
+            MATCH (d:Document {pipeline_id: $pipeline_id})
+            WITH collect(d) as all_docs
+
+            // 2. Unwind them so we can optionally find their edges
+            UNWIND all_docs as d
+            OPTIONAL MATCH (d)-[r:SIMILAR_TO|MENTIONS]-(t)
+
+            // 3. Filter out super-connectors: Only include entities if they are specific bridges (mentioned by 2 to 15 docs max)
+            WHERE t IS NULL OR t:Document OR 
+                  (t:CanonicalEntity AND 1 < COUNT { (t)<-[:MENTIONS]-(:Document {pipeline_id: $pipeline_id}) } <= 15)
+
+            // 4. Return the data, prioritizing SIMILAR_TO edges over MENTIONS
+            RETURN id(d) as source_id, coalesce(d.title, d.url) as source_name, 'Document' as source_type, d.url as source_url,
+                   id(t) as target_id, coalesce(t.title, t.name) as target_name, 
+                   CASE WHEN t:Document THEN 'Document' ELSE t.type END as target_type, 
+                   t.url as target_url,
+                   type(r) as rel_type, 
+                   CASE WHEN type(r) = 'SIMILAR_TO' THEN r.weight ELSE 0.5 END as weight, 
+                   [] as quotes
+            ORDER BY weight DESC
+            LIMIT 2500
             """
+        elif theme == "companies":
+            query = """
+            MATCH (s:CanonicalEntity {pipeline_id: $pipeline_id})-[r]-(t:CanonicalEntity {pipeline_id: $pipeline_id})
+            WHERE s.type IN ['Company', 'Startup', 'Incumbent', 'Utility', 'Investor'] OR t.type IN ['Company', 'Startup', 'Incumbent', 'Utility', 'Investor']
+            RETURN id(s) as source_id, s.name as source_name, s.type as source_type, 
+                   id(t) as target_id, t.name as target_name, t.type as target_type, 
+                   type(r) as rel_type, r.weight as weight, r.quotes as quotes
+            ORDER BY r.weight DESC
+            LIMIT 2500
+            """
+        elif theme == "regulatory":
+            query = """
+            MATCH (s:CanonicalEntity {pipeline_id: $pipeline_id})-[r]-(t:CanonicalEntity {pipeline_id: $pipeline_id})
+            WHERE (s.type =~ '(?i).*regul.*|.*law.*|.*gov.*|.*polic.*|.*act.*|.*bill.*' AND t.type IN ['Company', 'Startup', 'Incumbent', 'Utility', 'Investor'])
+               OR (t.type =~ '(?i).*regul.*|.*law.*|.*gov.*|.*polic.*|.*act.*|.*bill.*' AND s.type IN ['Company', 'Startup', 'Incumbent', 'Utility', 'Investor'])
+            RETURN id(s) as source_id, s.name as source_name, s.type as source_type, 
+                   id(t) as target_id, t.name as target_name, t.type as target_type, 
+                   type(r) as rel_type, r.weight as weight, r.quotes as quotes
+            ORDER BY r.weight DESC
+            LIMIT 2500
+            """
+        else:
+            # Default "full" theme
+            query = """
             MATCH (s:CanonicalEntity {pipeline_id: $pipeline_id})-[r:INTERACTS_WITH]->(t:CanonicalEntity {pipeline_id: $pipeline_id})
             RETURN id(s) as source_id, s.name as source_name, s.type as source_type, 
                    id(t) as target_id, t.name as target_name, t.type as target_type, 
-                   r.type as rel_type, r.weight as weight, r.quotes as quotes
+                   type(r) as rel_type, r.weight as weight, r.quotes as quotes
             ORDER BY r.weight DESC
             LIMIT 2500
-            """, 
-            pipeline_id=site_id
-        )
+            """
+
+        result = await session.run(query, pipeline_id=site_id)
         records = await result.data()
         
         unique_nodes = {}
         for record in records:
             # Add source node
-            if record["source_id"] not in unique_nodes:
+            if record["source_id"] is not None and record["source_id"] not in unique_nodes:
                 unique_nodes[record["source_id"]] = {
                     "id": str(record["source_id"]),
                     "name": record["source_name"],
                     "type": record["source_type"],
                     "summary": None,
-                    "source_url": None
+                    "source_url": record.get("source_url")
                 }
-            # Add target node
-            if record["target_id"] not in unique_nodes:
+            # Add target node (ONLY IF IT EXISTS)
+            if record["target_id"] is not None and record["target_id"] not in unique_nodes:
                 unique_nodes[record["target_id"]] = {
                     "id": str(record["target_id"]),
                     "name": record["target_name"],
                     "type": record["target_type"],
                     "summary": None,
-                    "source_url": None
+                    "source_url": record.get("target_url")
                 }
             
-            # Add relationship
-            relationships.append({
-                "source": str(record["source_id"]),
-                "source_name": record["source_name"],
-                "type": record["rel_type"],
-                "target": str(record["target_id"]),
-                "target_name": record["target_name"],
-                "weight": record["weight"],
-                "quotes": record["quotes"] or []
-            })
+            # Add relationship (ONLY IF IT EXISTS)
+            if record["rel_type"] is not None:
+                relationships.append({
+                    "source": str(record["source_id"]),
+                    "source_name": record["source_name"],
+                    "type": record["rel_type"],
+                    "target": str(record["target_id"]),
+                    "target_name": record["target_name"],
+                    "weight": record["weight"],
+                    "quotes": record["quotes"] or []
+                })
             
         entities = list(unique_nodes.values())
 
@@ -460,7 +499,7 @@ async def explore_node_group(
     user_id: str = Depends(get_current_tenant)
 ):
     from src.db.neo4j_session import driver
-    from langchain_google_genai import ChatGoogleGenerativeAI
+    from src.services.rag_service import generate_rag_insight
     import os
     
     # Verify site exists and belongs to user's tenant
@@ -488,10 +527,11 @@ async def explore_node_group(
             OPTIONAL MATCH (c)-[r1:INTERACTS_WITH]-(n1:CanonicalEntity {pipeline_id: $pipeline_id})
             
             RETURN 
-                id(c) as central_id, c.name as central_name, c.type as central_type,
-                id(n1) as neighbor_id, n1.name as neighbor_name, n1.type as neighbor_type,
+                id(c) as central_id, c.name as central_name, c.type as central_type, c.description as central_description,
+                properties(c) as central_props,
+                id(n1) as neighbor_id, n1.name as neighbor_name, n1.type as neighbor_type, n1.description as neighbor_description,
                 r1.type as rel_type, r1.weight as weight, r1.quotes as quotes, r1.source_urls as source_urls,
-                startNode(r1) = c as is_outgoing
+                CASE WHEN r1 IS NOT NULL THEN startNode(r1) = c ELSE null END as is_outgoing
             """, 
             pipeline_id=site_id,
             node_id=int(node_id)
@@ -506,6 +546,8 @@ async def explore_node_group(
             "id": str(central_record["central_id"]),
             "name": central_record["central_name"],
             "type": central_record["central_type"],
+            "description": central_record.get("central_description"),
+            "props": central_record.get("central_props", {}),
             "investor_insight": None
         }
         entities[str(central_record["central_id"])] = central_node
@@ -517,7 +559,8 @@ async def explore_node_group(
                     entities[n_id] = {
                         "id": n_id,
                         "name": record["neighbor_name"],
-                        "type": record["neighbor_type"]
+                        "type": record["neighbor_type"],
+                        "description": record.get("neighbor_description")
                     }
                 
                 # Determine source and target based on direction
@@ -540,52 +583,132 @@ async def explore_node_group(
                         "source_urls": record.get("source_urls") or []
                     })
                     
-        # Always generate a new investor insight
-        llm = ChatGoogleGenerativeAI(
-            model="gemini-2.0-flash", 
-            api_key=os.getenv("GEMINI_API_KEY"),
-            temperature=0.0
-        )
-        
-        # Format relationships for the prompt
-        rels_text = []
-        for r in relationships:
-            direction = "->" if r["source"] == str(central_record["central_id"]) else "<-"
-            other_node = r["target_name"] if r["source"] == str(central_record["central_id"]) else r["source_name"]
-            quotes = " | ".join(r["quotes"][:3]) # Limit to top 3 quotes to save context
-            
-            # Filter out empty URLs
-            valid_urls = [url for url in r.get("source_urls", []) if url and url.strip()]
-            sources = ", ".join(valid_urls[:3])
-            source_str = f" [Source: {sources}]" if sources else ""
-            
-            # If there are valid URLs, format them as markdown links immediately
-            # so the LLM doesn't have to guess
-            if valid_urls:
-                formatted_sources = ", ".join([f"[{url}]({url})" for url in valid_urls[:3]])
-                source_str = f" [Source: {formatted_sources}]"
-                
-            rels_text.append(f"- {central_node['name']} {direction} [{r['type']}] {direction} {other_node} (Evidence: \"{quotes}\"{source_str})")
-            
-        prompt = f"""You are a VC/PE analyst. Analyze this central entity and its network of relationships. 
-Provide a holistic description of this group, the dynamics at play, and why it is relevant from an investment perspective.
-
-Central Entity: {central_node['name']} ({central_node['type']})
-
-Relationships:
-{chr(10).join(rels_text)}
-
-Provide a concise, insightful 2-3 paragraph analysis.
-The relationships above already contain pre-formatted Markdown links in the `[Source: ...]` sections.
-Whenever you mention a fact or relationship from the evidence, you MUST include the exact Markdown link provided in the relationship string. 
-Do NOT try to create your own links. Just copy the `[URL](URL)` strings exactly as they appear in the Relationships section above.
-If a relationship does not have a `[Source: ...]` section with a Markdown link, do not add a link for it."""
-
+        # Always generate a new investor insight using the RAG service
         try:
-            insight_result = await llm.ainvoke(prompt)
-            central_node["investor_insight"] = insight_result.content
+            insight = await generate_rag_insight(site_id, int(node_id), "Entity")
+            central_node["investor_insight"] = insight
         except Exception as e:
             print(f"Failed to generate investor insight: {e}")
+            central_node["investor_insight"] = "Analysis could not be generated at this time."
+
+    return {
+        "central_node": central_node,
+        "entities": list(entities.values()),
+        "relationships": relationships
+    }
+
+@router.get("/pipelines/{site_id}/documents/{node_id}/explore")
+async def explore_document_group(
+    site_id: str,
+    node_id: str,
+    db: AsyncSession = Depends(get_db_session),
+    user_id: str = Depends(get_current_tenant)
+):
+    from src.db.neo4j_session import driver
+    from src.services.rag_service import generate_rag_insight
+    
+    # Verify site exists and belongs to user's tenant
+    result = await db.execute(select(Tenant).where(Tenant.auth_id == user_id))
+    tenant = result.scalars().first()
+    if not tenant:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    result = await db.execute(select(Site).where(Site.id == site_id, Site.tenant_id == tenant.id))
+    site = result.scalars().first()
+    if not site:
+        raise HTTPException(status_code=404, detail="Pipeline not found")
+
+    entities = {}
+    relationships = []
+    central_node = None
+    
+    async with driver.session() as session:
+        # Fetch the central document and its connections (SIMILAR_TO docs and MENTIONS entities)
+        result = await session.run(
+            """
+            MATCH (d:Document {pipeline_id: $pipeline_id})
+            WHERE id(d) = $node_id
+            
+            OPTIONAL MATCH (d)-[r_sim:SIMILAR_TO]-(sim_doc:Document {pipeline_id: $pipeline_id})
+            OPTIONAL MATCH (d)-[r_mentions:MENTIONS]->(ent:CanonicalEntity {pipeline_id: $pipeline_id})
+            
+            RETURN 
+                id(d) as central_id, coalesce(d.title, d.url) as central_name, 'Document' as central_type, d.url as central_url,
+                id(sim_doc) as sim_id, coalesce(sim_doc.title, sim_doc.url) as sim_name, 'Document' as sim_type, sim_doc.url as sim_url, r_sim.weight as sim_weight,
+                id(ent) as ent_id, ent.name as ent_name, ent.type as ent_type
+            """, 
+            pipeline_id=site_id,
+            node_id=int(node_id)
+        )
+        records = await result.data()
+        
+        if not records or records[0]["central_id"] is None:
+            raise HTTPException(status_code=404, detail="Document not found")
+            
+        central_record = records[0]
+        central_node = {
+            "id": str(central_record["central_id"]),
+            "name": central_record["central_name"],
+            "type": central_record["central_type"],
+            "source_url": central_record["central_url"],
+            "investor_insight": None
+        }
+        entities[str(central_record["central_id"])] = central_node
+        
+        for record in records:
+            # Handle SIMILAR_TO documents
+            if record["sim_id"] is not None:
+                n_id = str(record["sim_id"])
+                if n_id not in entities:
+                    entities[n_id] = {
+                        "id": n_id,
+                        "name": record["sim_name"],
+                        "type": record["sim_type"],
+                        "source_url": record["sim_url"]
+                    }
+                
+                rel_exists = any(r["source"] == str(central_record["central_id"]) and r["target"] == n_id and r["type"] == 'SIMILAR_TO' for r in relationships)
+                if not rel_exists:
+                    relationships.append({
+                        "source": str(central_record["central_id"]),
+                        "source_name": central_record["central_name"],
+                        "type": "SIMILAR_TO",
+                        "target": n_id,
+                        "target_name": record["sim_name"],
+                        "weight": record["sim_weight"],
+                        "quotes": [],
+                        "source_urls": []
+                    })
+                    
+            # Handle MENTIONS entities
+            if record["ent_id"] is not None:
+                n_id = str(record["ent_id"])
+                if n_id not in entities:
+                    entities[n_id] = {
+                        "id": n_id,
+                        "name": record["ent_name"],
+                        "type": record["ent_type"]
+                    }
+                
+                rel_exists = any(r["source"] == str(central_record["central_id"]) and r["target"] == n_id and r["type"] == 'MENTIONS' for r in relationships)
+                if not rel_exists:
+                    relationships.append({
+                        "source": str(central_record["central_id"]),
+                        "source_name": central_record["central_name"],
+                        "type": "MENTIONS",
+                        "target": n_id,
+                        "target_name": record["ent_name"],
+                        "weight": 0.5,
+                        "quotes": [],
+                        "source_urls": []
+                    })
+                    
+        # Generate RAG insight for the document
+        try:
+            insight = await generate_rag_insight(site_id, int(node_id), "Document")
+            central_node["investor_insight"] = insight
+        except Exception as e:
+            print(f"Failed to generate document insight: {e}")
             central_node["investor_insight"] = "Analysis could not be generated at this time."
 
     return {
@@ -790,6 +913,87 @@ async def get_pipeline_sources(
         }
         
     return list(unique_sources.values())
+
+@router.get("/pipelines/{site_id}/documents/view")
+async def view_document(
+    site_id: str,
+    source_url: str,
+    db: AsyncSession = Depends(get_db_session),
+    user_id: str = Depends(get_current_tenant)
+):
+    from src.models.relational import Document as PGDocument
+    from src.services.storage import storage
+    from sqlalchemy import Integer
+    
+    # Verify site exists and belongs to user's tenant
+    result = await db.execute(select(Tenant).where(Tenant.auth_id == user_id))
+    tenant = result.scalars().first()
+    if not tenant:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    result = await db.execute(select(Site).where(Site.id == site_id, Site.tenant_id == tenant.id))
+    site = result.scalars().first()
+    if not site:
+        raise HTTPException(status_code=404, detail="Pipeline not found")
+
+    # Get data sources for this site
+    result = await db.execute(select(DataSource.id).where(DataSource.site_id == site_id))
+    data_source_ids = result.scalars().all()
+    
+    if not data_source_ids:
+        raise HTTPException(status_code=404, detail="Document not found")
+        
+    # Get the document
+    query = select(PGDocument).where(
+        PGDocument.data_source_id.in_(data_source_ids),
+        PGDocument.metadata_json["source_url"].astext == source_url
+    ).order_by(PGDocument.metadata_json["chunk_index"].astext.cast(Integer))
+    
+    result = await db.execute(query)
+    documents = result.scalars().all()
+    
+    if not documents:
+        raise HTTPException(status_code=404, detail="Document not found")
+        
+    # Determine type from extension or default to HTML
+    source_type = "html"
+    if source_url.lower().endswith(".pdf"):
+        source_type = "pdf"
+    elif source_url.lower().endswith(".docx"):
+        source_type = "docx"
+    elif source_url.lower().endswith(".pptx"):
+        source_type = "pptx"
+    elif source_url.lower().endswith(".xlsx") or source_url.lower().endswith(".csv"):
+        source_type = "spreadsheet"
+        
+    # Check if we have a storage object for presigned URL
+    storage_object = None
+    for doc in documents:
+        if doc.metadata_json and doc.metadata_json.get("storage_object"):
+            storage_object = doc.metadata_json.get("storage_object")
+            break
+            
+    viewer_url = None
+    if storage_object:
+        viewer_url = storage.get_presigned_url(storage_object)
+        
+    # Always return viewer_url if we have it
+    if viewer_url:
+        return {
+            "type": source_type,
+            "viewer_url": viewer_url,
+            "title": documents[0].title or source_url,
+            "source_url": source_url
+        }
+        
+    # Otherwise, return the combined raw text
+    combined_text = "\n\n".join([doc.raw_text for doc in documents if doc.raw_text])
+    return {
+        "type": "text",
+        "content": combined_text,
+        "title": documents[0].title or source_url,
+        "source_url": source_url
+    }
 
 @router.post("/pipelines", status_code=201)
 async def create_pipeline(

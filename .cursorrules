@@ -1,34 +1,44 @@
 # Project Context: Market Intelligence PaaS
-We are building an autonomous, multi-tenant Platform-as-a-Service for VC/PE investors to map market ecosystems (e.g., "Solid State Batteries"). 
-Users create customized "sites" (intelligence dashboards) via a guided AI onboarding process that defines the niche, compiles data sources (RSS, conferences, grants, emails, incubators, first-principles must-know niche knowledge), and orchestrates autonomous data ingestion into a Knowledge Graph, with as many hitl steps as are needed to successfully find, download, ingest the data.
 
-# Hardware & Environment Context
-- **OS:** WSL 2 (Ubuntu 24.04) on Windows.
-- **Hardware:** RTX 5090 (32GB VRAM), 128GB RAM.
-- **Execution:** Docker-first approach. All heavy-lifting dependencies (Postgres, Neo4j, Ollama) run in local containers with GPU passthrough.
+You are working on a high-throughput, cost-effective Market Intelligence Platform as a Service (PaaS) designed for VC/PE investors. The system maps complex industries (e.g., Electric Power, AI) using an "Outside-In" approach to discover critical disruptors and the long tail of startup-DNA firms.
 
-# Architecture & Tech Stack
-- **Backend / API:** Python, FastAPI, SQLAlchemy 2.0 (asyncpg), Alembic.
-- **Orchestration:** LangGraph for the ingestion/extraction state machine.
-- **AI Model Split:**
-  - *The Guide (User-Facing):* Frontier models via API (OpenAI/Anthropic) for conversational onboarding and ontology generation.
-  - *The Workhorse (Data Pipeline):* Local models via Ollama (e.g., Llama 3, Nomic) for heavy-lifting: entity extraction, summarization, and embeddings.
-- **Tri-DB Storage Layer (LOCKED IN):**
-  - *Relational:* PostgreSQL for state, Tenants, Sites, and DataSources.
-  - *Vector:* pgvector (inside Postgres) for Document embeddings and semantic search.
-  - *Graph:* Neo4j (with APOC) for the Knowledge Graph and entity relationships.
+## 1. Tech Stack & "RunPod-Ready" Infrastructure
+- **Backend:** FastAPI (Python), LangGraph (agentic workflows).
+- **Frontend:** Next.js (React), `react-force-graph-2d` (visualization).
+- **AI/Inference:** `vLLM` for high-throughput offline batch inference, Langchain (`ChatGoogleGenerativeAI`).
+- **Deployment:** Docker-first, containerized for self-hosted cloud GPU deployments (e.g., RunPod).
 
-# STRICT Development Rules
-1. **NO DUMMY DATA. NO THROWAWAY SCRIPTS.** Build functional, vertical slices connecting real data sources to real databases. If it fails, we troubleshoot it.
-2. **Dynamic Over Static:** Never hardcode data source types or graph ontologies as static Enums. Use Postgres `JSONB` columns (`config`, `extraction_schema`) so the platform adapts to the user's specific niche.
-3. **Async First:** Always use asynchronous Python libraries (`asyncpg`, async FastAPI, async LangChain/LangGraph nodes) to prevent blocking the event loop during heavy I/O or LLM inference.
+## 2. The Tri-DB Architecture
+You must strictly adhere to the separation of concerns across the three databases:
+1. **PostgreSQL (Relational & Vector State):** Stores tenants, data sources, raw document text, and **chunk-level embeddings via `pgvector`**.
+2. **Neo4j (Knowledge Graph):** Stores the explicit, LLM-extracted entities (`CanonicalEntity`, `Document`) and their relationships (`INTERACTS_WITH`, `COMPETES_WITH`, `MENTIONS`, `SIMILAR_TO`).
+3. **MinIO (Object Storage):** Stores the original raw files (PDFs, DOCX, PPTX) for verifiable source attribution via presigned URLs.
 
-# The LLMITL Graph Extraction Workflow
-When building the Knowledge Graph pipeline, strictly follow this 3-stage state enforcement:
-1. **Ontology Generation:** The user-facing AI generates a strict JSON Schema representing the niche's entities and relationships. This is saved to the Postgres `DataSource.extraction_schema`.
-2. **Constrained Extraction:** LangGraph passes the raw text and the dynamic Postgres schema to Ollama. Use LangChain's `with_structured_output` (or constrained decoding) to force the local LLM to output exact JSON matching the schema.
-3. **Entity Resolution:** Before inserting into Neo4j, prevent duplication by embedding the extracted entity, querying `pgvector` for similarities, and using a fast LLM prompt to verify if "Entity A" == "Entity B". Only then `MERGE` or `CREATE` in Neo4j.
+## 3. STRICT Architectural Directives (CRITICAL)
 
-# Core UX Philosophy: The Onboarding Wizard
-- Phase 1: "The Consultant" - A centered, minimalist chat interface. The Frontier AI extracts the investor's thesis and configures data sources conversationally.
-- Phase 2: "The Factory" - A dual-pane layout exposing the deterministic engine: the live `pipelineConfig` payload, and tools to prune the resulting knowledge graph.
+### A. Semantic Context & Document Similarity (The "True RAG" Rule)
+- **NEVER** concatenate and truncate full documents (e.g., to 1000 characters) to generate semantic embeddings or determine similarity.
+- **ALWAYS** operate at the **chunk level**. Semantic similarity (`SIMILAR_TO` edges) must be calculated by comparing the `pgvector` embeddings of individual document chunks in PostgreSQL.
+- Document-level relationships must be rolled up from these deep, chunk-level semantic links, allowing the system to reference specific sections (e.g., "Section X of Doc Y relates to Section H of Doc Z").
+
+### B. Graph Completeness & Cypher Queries
+- **NEVER** write Cypher queries for the frontend views (Documents, Companies, Regulatory) that accidentally hide data. 
+- **ALWAYS** use `OPTIONAL MATCH` when querying for edges to ensure "island" nodes (nodes with no connections) are still returned to the frontend. Every ingested document must be visible.
+
+### C. Entities as Bridges
+- Documents are connected in two ways:
+  1. **Implicitly:** via chunk-level vector similarity (`SIMILAR_TO`).
+  2. **Explicitly:** via shared extracted entities (`MENTIONS`). If two documents mention the same `CanonicalEntity` (e.g., a Company or Regulation), that entity acts as the bridge.
+
+### D. Verifiable Source Attribution
+- Every LLM-generated insight must maintain a strict trail back to the original source.
+- The UI must allow users to click a Document node or a source link and view the original document on-page (via MinIO presigned URLs for files, or Postgres raw text for HTML), without leaving the app.
+
+### E. Graph Pruning & "Slop Nodes"
+- The extraction pipeline must actively prune "slop nodes" (generic, meaningless entities like "Section 6" or "The Company") to prevent them from becoming massive, hallucination-inducing super-connectors in the Neo4j graph.
+
+## 4. AI Agent Execution Rules
+1. **Read the Plan:** Before writing major scripts or altering the database schema, you MUST review the established architectural plans in the chat history.
+2. **No Generic Boilerplate:** Do not default to generic, lazy coding patterns (like basic `SentenceTransformer` document truncation) when a bespoke, high-fidelity architecture (like chunk-level `pgvector`) has been established.
+3. **Verify Constraints:** Before executing a shell command to run a script, explicitly verify that the script adheres to the Tri-DB architecture and the "True RAG" rule.
+4. **API & Quota Assumptions (CRITICAL):** NEVER assume the user is on a free tier for Gemini or Google APIs. The project operates on a Paid tier with high RPM/TPM limits (e.g., 2000 RPM / 4M TPM). If a `429 RESOURCE_EXHAUSTED` error occurs, DO NOT suggest upgrading the account. Instead, assume burst limits, concurrent connection limits, or specific model endpoint routing issues, and implement exponential backoff/retry logic.

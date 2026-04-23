@@ -1,6 +1,7 @@
 from langgraph.graph import StateGraph, END
 from src.agents.state import AgentState
 from src.agents.nodes import (
+    market_sizing_node, company_extraction_node,
     planner_node, search_node, global_dedup_node, scrape_node, 
     bouncer_node, vector_storage_node
 )
@@ -9,6 +10,8 @@ def build_acquisition_graph() -> StateGraph:
     workflow = StateGraph(AgentState)
 
     # Add nodes
+    workflow.add_node("market_sizing", market_sizing_node)
+    workflow.add_node("company_extraction", company_extraction_node)
     workflow.add_node("planner", planner_node)
     workflow.add_node("searcher", search_node)
     workflow.add_node("global_dedup", global_dedup_node)
@@ -17,6 +20,8 @@ def build_acquisition_graph() -> StateGraph:
     workflow.add_node("vector_storage", vector_storage_node)
 
     # Add edges
+    workflow.add_edge("market_sizing", "company_extraction")
+    workflow.add_edge("company_extraction", "planner")
     workflow.add_edge("planner", "searcher")
 
     def check_url_yield(state: AgentState) -> str:
@@ -72,6 +77,6 @@ def build_acquisition_graph() -> StateGraph:
 
     workflow.add_conditional_edges("vector_storage", route_after_processing, {"scraper": "scraper", "planner": "planner", END: END})
 
-    workflow.set_entry_point("planner")
+    workflow.set_entry_point("market_sizing")
 
     return workflow.compile()

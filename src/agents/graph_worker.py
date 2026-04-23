@@ -19,11 +19,12 @@ from src.models.relational import DataSource, Document as PGDocument
 from src.api.events import event_manager
 
 # Initialize LLMs
-llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", api_key=os.getenv("GEMINI_API_KEY"))
+llm = ChatGoogleGenerativeAI(model=os.getenv("GEMINI_MODEL", "gemini-3-flash-preview"), api_key=os.getenv("GEMINI_API_KEY"))
 
 class ExtractedEntity(BaseModel):
     name: str = Field(description="The name of the entity")
     type: str = Field(description="The type of the entity (e.g., Company, Person, Concept, Technology)")
+    description: str = Field(description="A concise description or context of the entity based on the text")
 
 class ExtractedRelationship(BaseModel):
     source: str = Field(description="The name of the source entity")
@@ -82,10 +83,11 @@ async def llm_producer_worker(
             system_prompt = """You are an Open Information Extraction system. Read the text and extract every distinct entity (people, companies, concepts, technologies, regulations, metrics, etc.). For every pair of entities that interact, extract the relationship between them. Name the entity types and relationship types whatever you think is most accurate. Do not constrain yourself to a specific schema.
 
 CRITICAL: For every relationship, you MUST extract the exact, verbatim substring from the text that proves this relationship exists in the `exact_quote` field. If you cannot quote the text verbatim, do not extract the relationship.
+CRITICAL: For every entity, you MUST extract a concise `description` or context of what the entity is, based on the text.
 
 You MUST respond in valid JSON format matching this exact schema:
 {
-  "entities": [{"name": "string", "type": "string"}],
+  "entities": [{"name": "string", "type": "string", "description": "string"}],
   "relationships": [{"source": "string", "target": "string", "type": "string", "exact_quote": "string"}]
 }"""
             payload = {
@@ -162,7 +164,7 @@ async def neo4j_batch_consumer(
                 # Aggregate
                 for e in validated.entities:
                     batch_entities.append({
-                        "name": e.name, "type": e.type, "source_url": result["source_url"]
+                        "name": e.name, "type": e.type, "description": e.description, "source_url": result["source_url"]
                     })
                 for r in validated.relationships:
                     batch_relationships.append({
@@ -195,7 +197,7 @@ async def neo4j_batch_consumer(
                             """
                             UNWIND $entities AS entity
                             MERGE (e:RawEntity {name: entity.name, pipeline_id: $pipeline_id})
-                            SET e.type = entity.type, e.source_url = entity.source_url
+                            SET e.type = entity.type, e.description = entity.description, e.source_url = entity.source_url
                             """,
                             entities=batch_entities,
                             pipeline_id=site_id
@@ -437,11 +439,11 @@ async def run_graph_generation_worker(site_id: str, niche: str, cancel_event: as
 
         async with driver.session() as neo4j_session:
             result = await neo4j_session.run(
-                "MATCH (e:RawEntity {pipeline_id: $pipeline_id}) RETURN e.name as name, e.type as type",
+                "MATCH (e:RawEntity {pipeline_id: $pipeline_id}) RETURN e.name as name, e.type as type, e.description as description",
                 pipeline_id=site_id
             )
             records = await result.data()
-            raw_entities = [{"name": r["name"], "type": r["type"]} for r in records]
+            raw_entities = [{"name": r["name"], "type": r["type"], "description": r.get("description", "")} for r in records]
 
         if not raw_entities:
             await event_manager.publish(site_id, {
@@ -498,13 +500,18 @@ async def run_graph_generation_worker(site_id: str, niche: str, cancel_event: as
                 types = [e["type"] for e in cluster_entities if e["type"]]
                 canonical_type = max(set(types), key=types.count) if types else "Unknown"
 
+                # Use the longest description
+                descriptions = [e["description"] for e in cluster_entities if e.get("description")]
+                canonical_description = max(descriptions, key=len) if descriptions else ""
+
                 await neo4j_session.run(
                     """
                     MERGE (c:CanonicalEntity {name: $canonical_name, pipeline_id: $pipeline_id})
-                    SET c.type = $type
+                    SET c.type = $type, c.description = $description
                     """,
                     canonical_name=canonical_name,
                     type=canonical_type,
+                    description=canonical_description,
                     pipeline_id=site_id
                 )
                 
@@ -633,6 +640,246 @@ async def run_graph_generation_worker(site_id: str, niche: str, cancel_event: as
                 "total_chunks": total_chunks,
                 "current_phase": "Cancelled",
                 "message": "Graph generation cancelled by user during Phase 3."
+            })
+            return
+
+        # Phase 4: Graph Pruning (Slop Removal)
+        await event_manager.publish(site_id, {
+            "type": "graph_progress",
+            "processed_chunks": total_chunks,
+            "total_chunks": total_chunks,
+            "current_phase": "Phase 4: Graph Pruning",
+            "message": "Identifying and removing generic 'slop' nodes..."
+        })
+
+        async with driver.session() as neo4j_session:
+            # Identify supernodes (degree > 50)
+            result = await neo4j_session.run(
+                """
+                MATCH (c:CanonicalEntity {pipeline_id: $pipeline_id})
+                OPTIONAL MATCH (c)-[r]-()
+                WITH c, count(r) as degree
+                WHERE degree > 50
+                RETURN id(c) as id, c.name as name, c.type as type, c.description as description, degree
+                ORDER BY degree DESC
+                """,
+                pipeline_id=site_id
+            )
+            supernodes = await result.data()
+
+            if supernodes:
+                print(f"Found {len(supernodes)} potential slop nodes. Verifying with LLM...")
+                nodes_to_delete = []
+                
+                for node in supernodes:
+                    if cancel_event.is_set():
+                        break
+                        
+                    prompt = f"""You are a data quality filter for a market intelligence knowledge graph.
+I will give you the name, type, and description of a highly-connected node in the graph.
+Your job is to determine if this node is a generic document term/slop (e.g., 'Section 6', 'Page 4', 'Introduction', 'Table of Contents', 'Figure 1') OR a real-world entity (e.g., a company, person, technology, regulation, location).
+
+Node Name: {node['name']}
+Node Type: {node['type']}
+Node Description: {node['description']}
+
+Respond with exactly one word: "SLOP" if it is a generic document term, or "VALID" if it is a real-world entity."""
+                    
+                    try:
+                        verification_result = await llm.ainvoke(prompt)
+                        response_text = verification_result.content.strip().upper()
+                        
+                        if "SLOP" in response_text:
+                            nodes_to_delete.append(node['id'])
+                            print(f"Flagged as SLOP: {node['name']} (Degree: {node['degree']})")
+                        else:
+                            print(f"Validated: {node['name']} (Degree: {node['degree']})")
+                    except Exception as e:
+                        print(f"Error verifying node {node['name']}: {e}")
+
+                if nodes_to_delete:
+                    await event_manager.publish(site_id, {
+                        "type": "graph_progress",
+                        "processed_chunks": total_chunks,
+                        "total_chunks": total_chunks,
+                        "current_phase": "Phase 4: Graph Pruning",
+                        "message": f"Removing {len(nodes_to_delete)} generic slop nodes..."
+                    })
+                    
+                    # Delete the slop nodes
+                    for node_id in nodes_to_delete:
+                        await neo4j_session.run(
+                            """
+                            MATCH (n) WHERE id(n) = $node_id
+                            DETACH DELETE n
+                            """,
+                            node_id=node_id
+                        )
+                    print(f"Successfully deleted {len(nodes_to_delete)} slop nodes.")
+
+        if cancel_event.is_set():
+            await event_manager.publish(site_id, {
+                "type": "graph_progress",
+                "processed_chunks": total_chunks,
+                "total_chunks": total_chunks,
+                "current_phase": "Cancelled",
+                "message": "Graph generation cancelled by user during Phase 4."
+            })
+            return
+
+        # Phase 5: Document Nodes & MENTIONS
+        await event_manager.publish(site_id, {
+            "type": "graph_progress",
+            "processed_chunks": total_chunks,
+            "total_chunks": total_chunks,
+            "current_phase": "Phase 5: Document Nodes",
+            "message": "Creating Document nodes and MENTIONS edges..."
+        })
+
+        try:
+            async with driver.session() as neo4j_session:
+                for doc in filtered_documents:
+                    if cancel_event.is_set():
+                        break
+                    
+                    source_url = None
+                    if isinstance(doc.metadata_json, dict):
+                        source_url = doc.metadata_json.get("source_url")
+                    
+                    if not source_url:
+                        continue
+
+                    # Determine type from extension or default to html
+                    doc_type = "html"
+                    if source_url.lower().endswith(".pdf"):
+                        doc_type = "pdf"
+                    elif source_url.lower().endswith(".docx"):
+                        doc_type = "docx"
+                    elif source_url.lower().endswith(".pptx"):
+                        doc_type = "pptx"
+                    elif source_url.lower().endswith(".xlsx") or source_url.lower().endswith(".csv"):
+                        doc_type = "spreadsheet"
+
+                    # Create Document node
+                    await neo4j_session.run(
+                        """
+                        MERGE (d:Document {url: $url, pipeline_id: $pipeline_id})
+                        SET d.id = $doc_id, d.title = $title, d.type = $type
+                        """,
+                        url=source_url,
+                        pipeline_id=site_id,
+                        doc_id=str(doc.id),
+                        title=doc.title or source_url,
+                        type=doc_type
+                    )
+
+                    # Create MENTIONS edges
+                    await neo4j_session.run(
+                        """
+                        MATCH (d:Document {url: $url, pipeline_id: $pipeline_id})
+                        MATCH (r:RawEntity {source_url: $url, pipeline_id: $pipeline_id})-[:RESOLVES_TO]->(c:CanonicalEntity {pipeline_id: $pipeline_id})
+                        MERGE (d)-[:MENTIONS]->(c)
+                        """,
+                        url=source_url,
+                        pipeline_id=site_id
+                    )
+                    
+                    await neo4j_session.run(
+                        """
+                        MATCH (d:Document {url: $url, pipeline_id: $pipeline_id})
+                        MATCH (s:RawEntity)-[rel:RAW_RELATIONSHIP {source_url: $url, pipeline_id: $pipeline_id}]->(t:RawEntity)
+                        MATCH (s)-[:RESOLVES_TO]->(cs:CanonicalEntity)
+                        MATCH (t)-[:RESOLVES_TO]->(ct:CanonicalEntity)
+                        MERGE (d)-[:MENTIONS]->(cs)
+                        MERGE (d)-[:MENTIONS]->(ct)
+                        """,
+                        url=source_url,
+                        pipeline_id=site_id
+                    )
+        except Exception as e:
+            print(f"Error in Phase 5: {e}")
+
+        if cancel_event.is_set():
+            await event_manager.publish(site_id, {
+                "type": "graph_progress",
+                "processed_chunks": total_chunks,
+                "total_chunks": total_chunks,
+                "current_phase": "Cancelled",
+                "message": "Graph generation cancelled by user during Phase 5."
+            })
+            return
+
+        # Phase 6: Semantic Edges
+        await event_manager.publish(site_id, {
+            "type": "graph_progress",
+            "processed_chunks": total_chunks,
+            "total_chunks": total_chunks,
+            "current_phase": "Phase 6: Semantic Edges",
+            "message": "Generating vector similarity edges..."
+        })
+
+        try:
+            # Document-to-Document Similarity (Chunk-Level pgvector)
+            url_embeddings = {}
+            for doc in filtered_documents:
+                if not doc.embedding or not isinstance(doc.metadata_json, dict):
+                    continue
+                source_url = doc.metadata_json.get("source_url")
+                if not source_url:
+                    continue
+                
+                if source_url not in url_embeddings:
+                    url_embeddings[source_url] = []
+                url_embeddings[source_url].append(np.array(doc.embedding))
+                
+            urls = list(url_embeddings.keys())
+            if len(urls) >= 2:
+                threshold = 0.85
+                edges = []
+                for i in range(len(urls)):
+                    url_a = urls[i]
+                    chunks_a = np.array(url_embeddings[url_a])
+                    
+                    for j in range(i + 1, len(urls)):
+                        url_b = urls[j]
+                        chunks_b = np.array(url_embeddings[url_b])
+                        
+                        sim_matrix = cosine_similarity(chunks_a, chunks_b)
+                        max_sim = float(np.max(sim_matrix))
+                        
+                        if max_sim > threshold:
+                            edges.append({
+                                "source": url_a,
+                                "target": url_b,
+                                "weight": max_sim
+                            })
+                            
+                if edges:
+                    async with driver.session() as neo4j_session:
+                        batch_size = 1000
+                        for idx in range(0, len(edges), batch_size):
+                            batch = edges[idx:idx + batch_size]
+                            await neo4j_session.run(
+                                """
+                                UNWIND $batch AS edge
+                                MATCH (d1:Document {url: edge.source, pipeline_id: $pipeline_id})
+                                MATCH (d2:Document {url: edge.target, pipeline_id: $pipeline_id})
+                                MERGE (d1)-[r:SIMILAR_TO]->(d2)
+                                SET r.weight = edge.weight
+                                """,
+                                batch=batch,
+                                pipeline_id=site_id
+                            )
+        except Exception as e:
+            print(f"Error in Phase 6: {e}")
+
+        if cancel_event.is_set():
+            await event_manager.publish(site_id, {
+                "type": "graph_progress",
+                "processed_chunks": total_chunks,
+                "total_chunks": total_chunks,
+                "current_phase": "Cancelled",
+                "message": "Graph generation cancelled by user during Phase 6."
             })
             return
 
