@@ -1,0 +1,13 @@
+---
+description: Documentation governance for architecture and migration work
+globs: docs/**/*.md
+alwaysApply: false
+---
+
+# Documentation Governance
+
+- `docs/` is canonical. `.cursor/plans/` is temporary.
+- Update docs when architecture, invariants, or contracts change.
+- Add or revise ADRs for major decisions about storage, orchestration, cutover, or ingestion path.
+- Prefer concise, durable docs over scratch-note prose.
+- Keep documentation aligned with the “maximum results and performance” philosophy.

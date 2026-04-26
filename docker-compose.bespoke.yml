@@ -1,0 +1,60 @@
+services:
+  postgres:
+    image: ankane/pgvector:latest
+    container_name: market_bespoke_postgres
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: market_bespoke_db
+    ports:
+      - "55432:5432"
+    volumes:
+      - postgres_data_bespoke:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  neo4j:
+    image: neo4j:5.18.0
+    container_name: market_bespoke_neo4j
+    environment:
+      NEO4J_AUTH: neo4j/password
+      NEO4J_apoc_export_file_enabled: "true"
+      NEO4J_apoc_import_file_enabled: "true"
+      NEO4J_apoc_import_file_use__neo4j__config: "true"
+      NEO4J_PLUGINS: '["apoc", "graph-data-science"]'
+    ports:
+      - "17474:7474"
+      - "17687:7687"
+    volumes:
+      - neo4j_data_bespoke:/data
+    restart: unless-stopped
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: market_bespoke_pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "15050:80"
+    depends_on:
+      - postgres
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    container_name: market_bespoke_minio
+    environment:
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: password
+    ports:
+      - "19000:9000"
+      - "19001:9001"
+    volumes:
+      - minio_data_bespoke:/data
+    command: server /data --console-address ":9001"
+    restart: unless-stopped
+
+volumes:
+  postgres_data_bespoke:
+  neo4j_data_bespoke:
+  minio_data_bespoke:

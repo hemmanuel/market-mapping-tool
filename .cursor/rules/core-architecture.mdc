@@ -1,0 +1,16 @@
+---
+description: Core platform architecture invariants
+alwaysApply: true
+---
+
+# Core Architecture
+
+- Treat `docs/` as the canonical architecture source of truth.
+- Preserve Tri-DB boundaries:
+  - PostgreSQL for durable workflow state, text, and embeddings.
+  - Neo4j for graph projections.
+  - MinIO for original artifacts.
+- Use front-door ingestion for new runs, backfills, replay, and startup recovery.
+- Preserve primary sources whenever acquired; snippets alone are not durable evidence.
+- Keep semantic retrieval chunk-first. Do not use document truncation as a substitute for real RAG.
+- Do not accept happy-path-only orchestration as the target design.

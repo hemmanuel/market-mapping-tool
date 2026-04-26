@@ -1,0 +1,17 @@
+---
+description: Standards for bespoke orchestrator kernel work
+globs: src/orchestrator/**/*.py
+alwaysApply: false
+---
+
+# Orchestrator Kernel
+
+- Prefer durable orchestration primitives over in-memory convenience.
+- Workers should use typed inputs and outputs, not implicit shared state.
+- Transition logic should move toward declarative mappings, fan-out, joins, and explicit failure handling.
+- Design for leases, heartbeats, retries, idempotency, replay, and dead-letter handling.
+- Do not leave placeholder transitions or “pass for now” routing in end-state kernel code.
+- Align kernel changes with:
+  - `docs/architecture/orchestrator-kernel.md`
+  - `docs/architecture/workflow-state-model.md`
+  - `docs/architecture/transition-model.md`

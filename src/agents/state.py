@@ -10,6 +10,10 @@ class AgentState(TypedDict):
     schema_entities: List[str]
     schema_relationships: List[Dict[str, str]]
     
+    # Discovery State
+    micro_buckets: List[str]
+    discovered_companies: List[str]
+    
     # Execution State
     search_queries: List[SearchQuery]
     search_attempts: int
@@ -20,7 +24,6 @@ class AgentState(TypedDict):
     current_url: Optional[str]
     raw_text: Optional[str]
     storage_object: Optional[str]
-    ignore_size_limit: Optional[bool]
     search_feedback: List[str]
     relevant_urls_count: int
     
