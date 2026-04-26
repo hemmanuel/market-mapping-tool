@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
 import { cn } from "@/lib/utils";
+import { ApiRuntimeBridge } from "@/components/api-runtime-bridge";
 import { ClerkProvider, SignInButton, SignUpButton, SignedIn, SignedOut, UserButton } from "@clerk/nextjs";
 
 const inter = Inter({ subsets: ["latin"], variable: "--font-sans" });
@@ -20,6 +21,7 @@ export default function RootLayout({
     <html lang="en" className={cn("font-sans", inter.variable)}>
       <body className="antialiased font-sans bg-slate-50 text-slate-900">
         <ClerkProvider>
+          <ApiRuntimeBridge />
           <header className="flex justify-end p-4 bg-white border-b border-slate-200">
             <SignedOut>
               <div className="flex gap-4">

@@ -29,6 +29,9 @@ if config.config_file_name is not None:
 # add your model's MetaData object here
 # for 'autogenerate' support
 from src.models.relational import Base
+from src.orchestrator.core import enrichment_models  # noqa: F401
+from src.orchestrator.core import graph_models  # noqa: F401
+from src.orchestrator.core import ledger_models  # noqa: F401
 target_metadata = Base.metadata
 
 # other values from the config, defined by the needs of env.py,

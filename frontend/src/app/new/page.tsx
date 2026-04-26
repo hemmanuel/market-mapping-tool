@@ -6,6 +6,7 @@ import ReactMarkdown from "react-markdown";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { backendApiPath } from "@/lib/backend-api";
 import { Send, Bot, User, Settings, Plus, Trash2, Target, Database, Network, CheckCircle2 } from "lucide-react";
 import { OnboardingStep, PipelineConfig } from "@/lib/types";
 import { Timeline } from "@/components/Timeline";
@@ -14,8 +15,11 @@ import { useRouter } from "next/navigation";
 // Add global type for Clerk
 declare global {
   interface Window {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    Clerk?: any;
+    Clerk?: {
+      session?: {
+        getToken?: () => Promise<string | null>;
+      };
+    };
   }
 }
 
@@ -120,14 +124,14 @@ export default function OnboardingWizard() {
                 try {
                   // We need to get the Clerk token to authenticate the request
                   // Fetching it directly from window.Clerk avoids adding hooks to the dependency array
-                  const token = await window.Clerk?.session?.getToken();
+                  const token = await window.Clerk?.session?.getToken?.();
                   
                   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
                   if (token) {
                     headers['Authorization'] = `Bearer ${token}`;
                   }
 
-                  const res = await fetch('http://localhost:8000/api/v1/pipelines', {
+                  const res = await fetch(backendApiPath("/api/v1/pipelines"), {
                     method: 'POST',
                     headers,
                     body: JSON.stringify(finalConfig),

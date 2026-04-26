@@ -5,6 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import { useAuth } from "@clerk/nextjs";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { backendApiPath } from "@/lib/backend-api";
 import { Database, FileText, File, FileSpreadsheet, Globe, ExternalLink, ArrowLeft } from "lucide-react";
 
 interface Source {
@@ -58,7 +59,7 @@ export default function DataExplorer() {
         headers['Authorization'] = `Bearer ${token}`;
       }
 
-      const res = await fetch(`http://localhost:8000/api/v1/pipelines/${pipelineId}/sources`, { headers });
+      const res = await fetch(backendApiPath(`/api/v1/pipelines/${pipelineId}/sources`), { headers });
       if (res.ok) {
         const data = await res.json();
         setSources(data);
@@ -82,7 +83,10 @@ export default function DataExplorer() {
       }
 
       // We'll fetch all chunks for this specific source
-      const res = await fetch(`http://localhost:8000/api/v1/pipelines/${pipelineId}/documents?source_url=${encodeURIComponent(url)}`, { headers });
+      const res = await fetch(
+        backendApiPath(`/api/v1/pipelines/${pipelineId}/documents?source_url=${encodeURIComponent(url)}`),
+        { headers }
+      );
       if (res.ok) {
         const data = await res.json();
         setChunks(data.chunks || []);

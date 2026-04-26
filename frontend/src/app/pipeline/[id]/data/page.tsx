@@ -1,19 +1,31 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { useChat } from "ai/react";
 import ReactMarkdown from "react-markdown";
 import { useAuth } from "@clerk/nextjs";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Play, RefreshCw, Database, Activity, CheckCircle2, AlertCircle, Bot, Terminal, Square, Search, ExternalLink, Download } from "lucide-react";
+import { backendApiPath } from "@/lib/backend-api";
+import {
+  DocumentChunk,
+  DocumentsResponse,
+  PendingDocument,
+  PipelineEntitiesResponse,
+  PipelineEntity,
+  QueueItem,
+} from "@/lib/pipeline-types";
+import { Play, RefreshCw, Database, Activity, CheckCircle2, AlertCircle, Bot, Terminal, Square, Search, ExternalLink, Download, Users, Building2 } from "lucide-react";
 
 // Add global type for Clerk
 declare global {
   interface Window {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    Clerk?: any;
+    Clerk?: {
+      session?: {
+        getToken?: () => Promise<string | null>;
+      };
+    };
   }
 }
 
@@ -26,18 +38,11 @@ export default function DataCommandCenter() {
   const [isAcquiring, setIsAcquiring] = useState(false);
   const [isGeneratingGraph, setIsGeneratingGraph] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
-  const [graphStatus, setGraphStatus] = useState<string>("");
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const [entities, setEntities] = useState<any[]>([]);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const [relationships, setRelationships] = useState<any[]>([]);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const [chunks, setChunks] = useState<any[]>([]);
+  const [entities, setEntities] = useState<PipelineEntity[]>([]);
+  const [chunks, setChunks] = useState<DocumentChunk[]>([]);
   const [totalChunks, setTotalChunks] = useState(0);
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const [queue, setQueue] = useState<any[]>([]);
-  const [pendingDocs, setPendingDocs] = useState<any[]>([]);
+  const [queue, setQueue] = useState<QueueItem[]>([]);
+  const [pendingDocs, setPendingDocs] = useState<PendingDocument[]>([]);
   const [logs, setLogs] = useState<string[]>([]);
   
   const hasStartedAcquisition = useRef(false);
@@ -83,7 +88,7 @@ export default function DataCommandCenter() {
         headers['Authorization'] = `Bearer ${token}`;
       }
 
-      const res = await fetch(`http://localhost:8000/api/v1/pipelines/${pipelineId}/acquire`, {
+      const res = await fetch(backendApiPath(`/api/v1/pipelines/${pipelineId}/acquire`), {
         method: 'POST',
         headers
       });
@@ -103,7 +108,7 @@ export default function DataCommandCenter() {
         headers['Authorization'] = `Bearer ${token}`;
       }
 
-      const res = await fetch(`http://localhost:8000/api/v1/pipelines/${pipelineId}/cancel`, {
+      const res = await fetch(backendApiPath(`/api/v1/pipelines/${pipelineId}/cancel`), {
         method: 'POST',
         headers
       });
@@ -124,7 +129,7 @@ export default function DataCommandCenter() {
         headers['Authorization'] = `Bearer ${token}`;
       }
 
-      const res = await fetch(`http://localhost:8000/api/v1/pipelines/${pipelineId}/generate-graph`, {
+      const res = await fetch(backendApiPath(`/api/v1/pipelines/${pipelineId}/generate-graph`), {
         method: 'POST',
         headers
       });
@@ -145,7 +150,7 @@ export default function DataCommandCenter() {
         headers['Authorization'] = `Bearer ${token}`;
       }
 
-      const res = await fetch(`http://localhost:8000/api/v1/pipelines/${pipelineId}/cancel-graph`, {
+      const res = await fetch(backendApiPath(`/api/v1/pipelines/${pipelineId}/cancel-graph`), {
         method: 'POST',
         headers
       });
@@ -166,7 +171,7 @@ export default function DataCommandCenter() {
         headers['Authorization'] = `Bearer ${token}`;
       }
 
-      const res = await fetch(`http://localhost:8000/api/v1/pipelines/${pipelineId}/export`, { headers });
+      const res = await fetch(backendApiPath(`/api/v1/pipelines/${pipelineId}/export`), { headers });
       if (!res.ok) throw new Error("Failed to export graph");
 
       const blob = await res.blob();
@@ -186,7 +191,7 @@ export default function DataCommandCenter() {
     }
   };
 
-  const fetchExplorerData = async () => {
+  const fetchExplorerData = useCallback(async () => {
     try {
       const token = await getToken();
       const headers: Record<string, string> = {};
@@ -195,31 +200,30 @@ export default function DataCommandCenter() {
       }
 
       const [resEntities, resDocs, resPending] = await Promise.all([
-        fetch(`http://localhost:8000/api/v1/pipelines/${pipelineId}/entities`, { headers }),
-        fetch(`http://localhost:8000/api/v1/pipelines/${pipelineId}/documents`, { headers }),
-        fetch(`http://localhost:8000/api/v1/pipelines/${pipelineId}/pending-documents`, { headers })
+        fetch(backendApiPath(`/api/v1/pipelines/${pipelineId}/entities`), { headers }),
+        fetch(backendApiPath(`/api/v1/pipelines/${pipelineId}/documents`), { headers }),
+        fetch(backendApiPath(`/api/v1/pipelines/${pipelineId}/pending-documents`), { headers })
       ]);
 
       if (resEntities.ok) {
-        const data = await resEntities.json();
+        const data = (await resEntities.json()) as PipelineEntitiesResponse;
         setEntities(data.entities || []);
-        setRelationships(data.relationships || []);
       }
       
       if (resDocs.ok) {
-        const data = await resDocs.json();
+        const data = (await resDocs.json()) as DocumentsResponse;
         setChunks(data.chunks || []);
         setTotalChunks(data.total_chunks || 0);
       }
 
       if (resPending.ok) {
-        const data = await resPending.json();
+        const data = (await resPending.json()) as PendingDocument[];
         setPendingDocs(data || []);
       }
     } catch (error) {
       console.error("Failed to fetch explorer data", error);
     }
-  };
+  }, [getToken, pipelineId]);
 
   const handleProcessPending = async (docId: string, action: string, charLimit?: number) => {
     try {
@@ -231,7 +235,7 @@ export default function DataCommandCenter() {
         headers['Authorization'] = `Bearer ${token}`;
       }
 
-      const res = await fetch(`http://localhost:8000/api/v1/pipelines/${pipelineId}/pending-documents/${docId}/process`, {
+      const res = await fetch(backendApiPath(`/api/v1/pipelines/${pipelineId}/pending-documents/${docId}/process`), {
         method: 'POST',
         headers,
         body: JSON.stringify({ action, char_limit: charLimit })
@@ -249,12 +253,11 @@ export default function DataCommandCenter() {
   };
 
   useEffect(() => {
-    fetchExplorerData();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pipelineId]);
+    void fetchExplorerData();
+  }, [fetchExplorerData]);
 
   useEffect(() => {
-    const eventSource = new EventSource(`http://localhost:8000/api/v1/pipelines/${pipelineId}/logs`);
+    const eventSource = new EventSource(backendApiPath(`/api/v1/pipelines/${pipelineId}/logs`));
 
     eventSource.onmessage = (event) => {
       try {
@@ -276,17 +279,15 @@ export default function DataCommandCenter() {
           if (data.entities && data.entities.length > 0) {
             setEntities(prev => [...prev, ...data.entities]);
           }
-          if (data.relationships && data.relationships.length > 0) {
-            setRelationships(prev => [...prev, ...data.relationships]);
-          }
         } else if (data.type === 'new_chunk') {
           setChunks(prev => [data.data, ...prev]);
           setTotalChunks(prev => prev + 1);
-        } else if (data.type === 'large_file_pending') {
-          fetchExplorerData(); // Refresh pending docs
         } else if (data.type === 'graph_progress') {
-          setIsGeneratingGraph(data.current_phase !== 'Complete' && data.current_phase !== 'Error');
-          setGraphStatus(data.message);
+          setIsGeneratingGraph(
+            data.current_phase !== 'Complete' &&
+            data.current_phase !== 'Error' &&
+            data.current_phase !== 'Cancelled'
+          );
           setLogs(prev => [...prev, `[${new Date().toLocaleTimeString()}] [Graph] ${data.message}`]);
         }
       } catch (err) {
@@ -302,7 +303,7 @@ export default function DataCommandCenter() {
     return () => {
       eventSource.close();
     };
-  }, [pipelineId]);
+  }, [pipelineId, fetchExplorerData]);
 
   return (
     <div className="flex flex-col h-screen w-full bg-slate-50 text-slate-900">
@@ -519,11 +520,28 @@ export default function DataCommandCenter() {
               <Button 
                 variant="outline" 
                 size="sm" 
+                className="h-7 text-xs border-violet-200 text-violet-700 hover:bg-violet-50"
+                onClick={() => router.push(`/pipeline/${pipelineId}/enrichments`)}
+              >
+                <Building2 className="w-3 h-3 mr-1" /> Company Dossiers
+              </Button>
+              <Button 
+                variant="outline" 
+                size="sm" 
                 className="h-7 text-xs border-purple-200 text-purple-700 hover:bg-purple-50"
                 disabled={entities.length === 0}
                 onClick={() => router.push(`/pipeline/${pipelineId}/graph`)}
               >
                 <Database className="w-3 h-3 mr-1" /> View Graph
+              </Button>
+              <Button 
+                variant="outline" 
+                size="sm" 
+                className="h-7 text-xs border-violet-200 text-violet-700 hover:bg-violet-50"
+                disabled={entities.length === 0}
+                onClick={() => router.push(`/pipeline/${pipelineId}/communities`)}
+              >
+                <Users className="w-3 h-3 mr-1" /> Communities
               </Button>
               <Badge variant="secondary" className="bg-blue-100 text-blue-700">
                 {totalChunks} Chunks
@@ -539,7 +557,7 @@ export default function DataCommandCenter() {
               <div className="space-y-4">
                 {chunks.map((chunk, i) => (
                   <div key={i} className="p-4 bg-white border border-slate-200 rounded-lg shadow-sm">
-                    <div className="text-xs text-slate-500 mb-2 font-mono truncate" title={chunk.source_url || chunk.source}>
+                    <div className="text-xs text-slate-500 mb-2 font-mono truncate" title={chunk.source_url || chunk.source || undefined}>
                       {chunk.source_url ? (
                         <a href={chunk.source_url} target="_blank" rel="noopener noreferrer" className="hover:underline text-blue-600">
                           {chunk.source_url}

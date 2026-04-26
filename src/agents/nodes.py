@@ -17,7 +17,7 @@ from src.agents.state import AgentState, SearchQuery
 from src.db.neo4j_session import driver
 from src.api.events import event_manager
 from src.db.session import AsyncSessionLocal
-from src.models.relational import DataSource, Document as PGDocument, PendingDocument
+from src.models.relational import DataSource, Document as PGDocument
 from src.services.storage import storage
 from sqlalchemy.future import select
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -29,13 +29,13 @@ load_dotenv()
 from langchain_ollama import ChatOllama
 
 # Initialize LLM and Embeddings
-llm = ChatGoogleGenerativeAI(model="gemini-3-flash-preview", api_key=os.getenv("GEMINI_API_KEY"))
+llm = ChatGoogleGenerativeAI(model=os.getenv("GEMINI_MODEL", "gemini-3-flash-preview"), api_key=os.getenv("GEMINI_API_KEY"))
 ollama_llm = ChatOllama(model="llama3.1", base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"), temperature=0)
 embeddings = GoogleGenerativeAIEmbeddings(model="models/gemini-embedding-001", google_api_key=os.getenv("GEMINI_API_KEY"))
 
 # Models for structured output
 class SearchVector(BaseModel):
-    intent: str = Field(description="The intent of this search vector (e.g., 'Discover Technical Whitepapers')")
+    intent: str = Field(description="The intent of this search vector (e.g., 'Phase 0a: Foundation - Regulatory Frameworks')")
     queries: List[str] = Field(description="List of specific search queries for this intent")
     expected_yield: str = Field(description="What kind of data this vector is expected to yield")
 
@@ -46,13 +46,148 @@ class BouncerOutput(BaseModel):
     is_relevant: bool = Field(description="Whether the text is relevant to the niche")
     reason: str = Field(description="Reason for relevance or irrelevance")
 
+class MarketSizingOutput(BaseModel):
+    micro_buckets: List[str] = Field(description="List of highly specific micro-buckets to search for companies")
+
+class CompanyExtractionOutput(BaseModel):
+    companies: List[str] = Field(description="List of discovered company names")
+
+async def market_sizing_node(state: AgentState) -> AgentState:
+    """Estimates market size and generates micro-buckets for exhaustive extraction."""
+    pipeline_id = state["pipeline_id"]
+    niche = state["niche"]
+    
+    await event_manager.publish(pipeline_id, {"type": "log", "message": f"[MarketSizing] Estimating market scale and generating micro-buckets for: {niche}"})
+    
+    system_prompt = """You are a Market Sizing Expert. Your goal is to help exhaustively map a market niche by breaking it down into small, highly specific "micro-buckets".
+    
+    First, estimate the total number of active VC-backed startups and mature companies in the niche across all stages (Seed, Series A, Series B, Late, Public).
+    Then, fracture the market into specific micro-buckets (by geography, sub-niche, or vintage) such that EACH bucket likely contains fewer than 50 companies.
+    
+    Example micro-buckets:
+    - "Seed stage Electric Power startups in North America funded in 2023"
+    - "Series A Grid Storage companies in Europe"
+    - "Late-stage Virtual Power Plant companies"
+    
+    Return a comprehensive list of these micro-buckets."""
+    
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", system_prompt),
+        ("user", "Niche: {niche}")
+    ])
+    
+    chain = prompt | llm.with_structured_output(MarketSizingOutput)
+    result = await chain.ainvoke({"niche": niche})
+    
+    micro_buckets = result.micro_buckets
+    await event_manager.publish(pipeline_id, {"type": "log", "message": f"[MarketSizing] Generated {len(micro_buckets)} micro-buckets for exhaustive extraction."})
+    
+    return {**state, "micro_buckets": micro_buckets}
+
+import asyncio
+
+async def company_extraction_node(state: AgentState) -> AgentState:
+    """Extracts companies for each micro-bucket concurrently."""
+    pipeline_id = state["pipeline_id"]
+    niche = state["niche"]
+    micro_buckets = state.get("micro_buckets", [])
+    
+    await event_manager.publish(pipeline_id, {"type": "log", "message": f"[CompanyExtraction] Extracting companies across {len(micro_buckets)} micro-buckets..."})
+    
+    async def extract_companies_for_bucket(bucket: str) -> List[str]:
+        # Task A: Memory-based extraction
+        system_prompt = f"""You are an expert VC/PE analyst with deep knowledge of the {niche} market.
+        List ALL known companies that fit perfectly into this specific micro-bucket: "{bucket}".
+        Return ONLY the company names."""
+        
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", system_prompt),
+            ("user", "Bucket: {bucket}")
+        ])
+        
+        chain = prompt | llm.with_structured_output(CompanyExtractionOutput)
+        memory_companies = []
+        try:
+            res = await chain.ainvoke({"bucket": bucket})
+            memory_companies = res.companies
+        except Exception as e:
+            print(f"Error extracting companies for bucket {bucket}: {e}")
+
+        # Task B: Active Search for Early-Stage
+        serper_api_key = os.getenv("SERPER_API_KEY")
+        search_queries = [
+            f'"{bucket}" "pre-seed" OR "seed" startup',
+            f'site:crunchbase.com/organization "{bucket}"'
+        ]
+        
+        early_stage_companies = []
+        if serper_api_key:
+            async with httpx.AsyncClient() as client:
+                for query in search_queries:
+                    try:
+                        response = await client.post(
+                            'https://google.serper.dev/search', 
+                            headers={'X-API-KEY': serper_api_key}, 
+                            json={"q": query, "num": 10},
+                            timeout=10.0
+                        )
+                        response.raise_for_status()
+                        data = response.json()
+                        snippets = [r.get("snippet", "") + " " + r.get("title", "") for r in data.get("organic", [])]
+                        
+                        if snippets:
+                            extraction_prompt = ChatPromptTemplate.from_messages([
+                                ("system", "Extract a list of startup company names from the following search snippets. Return ONLY the company names."),
+                                ("user", "Snippets: {snippets}")
+                            ])
+                            chain_extract = extraction_prompt | llm.with_structured_output(CompanyExtractionOutput)
+                            res_extract = await chain_extract.ainvoke({"snippets": "\n".join(snippets)})
+                            early_stage_companies.extend(res_extract.companies)
+                    except Exception as e:
+                        print(f"Error in active search for bucket {bucket}, query {query}: {e}")
+
+        return list(set(memory_companies + early_stage_companies))
+
+    # Run extractions concurrently
+    results = await asyncio.gather(*(extract_companies_for_bucket(bucket) for bucket in micro_buckets))
+    
+    # Flatten and deduplicate
+    discovered_companies = list(set([company for sublist in results for company in sublist if company]))
+    
+    await event_manager.publish(pipeline_id, {"type": "log", "message": f"[CompanyExtraction] Discovered {len(discovered_companies)} unique companies. Starting deep enrichment..."})
+    
+    from src.agents.enrichment_agent import enrich_company
+    from src.agents.neo4j_enrichment import save_enriched_company_to_neo4j
+    
+    # Limit concurrency to avoid rate limits (Serper/Gemini)
+    sem = asyncio.Semaphore(5)
+    
+    async def enrich_and_save(company_name: str):
+        async with sem:
+            try:
+                enriched = await enrich_company(company_name, niche)
+                if enriched:
+                    await save_enriched_company_to_neo4j(pipeline_id, enriched)
+            except Exception as e:
+                print(f"Error enriching {company_name}: {e}")
+                
+    # Run enrichment concurrently
+    if discovered_companies:
+        await asyncio.gather(*(enrich_and_save(company) for company in discovered_companies))
+        
+    await event_manager.publish(pipeline_id, {"type": "log", "message": f"[CompanyExtraction] Successfully enriched and saved companies to Neo4j."})
+    
+    return {**state, "discovered_companies": discovered_companies}
+
 async def planner_node(state: AgentState) -> AgentState:
-    """Generates search queries based on the niche and schema using Multi-Vector Search."""
+    """Generates search queries based on the niche, schema, and discovered companies."""
     pipeline_id = state["pipeline_id"]
     attempts = state.get("search_attempts", 0)
     target_urls = state.get("target_urls", 200)
     current_url_count = len(state.get("urls_to_scrape", []))
     search_feedback = state.get("search_feedback", [])
+    discovered_companies = state.get("discovered_companies", [])
+    micro_buckets = state.get("micro_buckets", [])
     
     await event_manager.publish(pipeline_id, {"type": "log", "message": f"[Planner] Analyzing niche: {state['niche']} (Attempt {attempts + 1})"})
     
@@ -61,6 +196,11 @@ async def planner_node(state: AgentState) -> AgentState:
         feedback_text = "\n\nFEEDBACK FROM PREVIOUS ATTEMPTS:\n" + "\n".join(search_feedback) + "\n\nAdjust your strategy based on this feedback. If previous searches yielded low-quality data, pivot to different filetypes or domains."
 
     system_prompt = f"""You are a Master Sourcing Strategist. Your goal is to find the highest-density, most authoritative data sources for the user's specific market niche and ontology.
+
+You MUST generate a structured search strategy incorporating the following elements:
+1. Phase 0a: The Foundation (Top-Down): Generate queries specifically targeting broad industry overviews, major incumbents, regulatory frameworks, and standard market maps to build the core knowledge backbone.
+2. Targeted Entity Deep-Dives: Generate specific search queries for the discovered companies to find primary sources (e.g., `"[Company Name]" "{state['niche']}" (funding OR technology)`).
+3. Aggregator Hunting: Generate queries based on the micro-buckets to find public lists and databases (e.g., `site:crunchbase.com/organization "[Bucket]"`).
 
 Think critically about where this specific type of data lives:
 - If the user wants financial data or market sizing, target `filetype:xls`, `filetype:csv`, or SEC EDGAR.
@@ -72,14 +212,16 @@ Generate highly targeted search vectors. Use advanced Google operators (`filetyp
 
     prompt = ChatPromptTemplate.from_messages([
         ("system", system_prompt),
-        ("user", "Niche: {niche}\nEntities: {schema_entities}\nRelationships: {schema_relationships}")
+        ("user", "Niche: {niche}\nEntities: {schema_entities}\nRelationships: {schema_relationships}\nDiscovered Companies: {discovered_companies}\nMicro-Buckets: {micro_buckets}")
     ])
     
     chain = prompt | llm.with_structured_output(PlannerOutput)
     result = await chain.ainvoke({
         "niche": state["niche"],
         "schema_entities": state["schema_entities"],
-        "schema_relationships": state["schema_relationships"]
+        "schema_relationships": state["schema_relationships"],
+        "discovered_companies": ", ".join(discovered_companies[:50]) + ("..." if len(discovered_companies) > 50 else ""),
+        "micro_buckets": ", ".join(micro_buckets)
     })
     
     flat_queries = []
@@ -356,28 +498,24 @@ async def scrape_node(state: AgentState) -> AgentState:
                     await event_manager.publish(pipeline_id, {"type": "log", "message": f"[Scraper] Extracted text too short (likely paywall/boilerplate). Rejecting."})
                     raw_text = ""
                 
-            # Check for massive documents
-            if len(raw_text) > 500000 and not state.get("ignore_size_limit"):
-                await event_manager.publish(pipeline_id, {"type": "log", "message": f"[Scraper] WARNING: Document is exceptionally large ({len(raw_text)} chars). Skipping to prevent memory overload."})
-                await event_manager.publish(pipeline_id, {"type": "large_file_pending", "data": {"url": current_url, "estimated_size": len(raw_text)}})
-                
-                async with AsyncSessionLocal() as session:
-                    try:
-                        pending_doc = PendingDocument(
-                            site_id=pipeline_id,
-                            url=current_url,
-                            estimated_size=len(raw_text),
-                            status="pending"
-                        )
-                        session.add(pending_doc)
-                        await session.commit()
-                    except Exception as db_err:
-                        await session.rollback()
-                        print(f"Failed to save PendingDocument: {db_err}")
-                
-                raw_text = "" # Return empty text so bouncer rejects it
-            else:
-                await event_manager.publish(pipeline_id, {"type": "log", "message": f"[Scraper] Successfully extracted {len(raw_text)} characters."})
+            # Continue large documents through the normal ingestion path rather than
+            # diverting them into a manual-review queue.
+            if len(raw_text) > 500000:
+                await event_manager.publish(
+                    pipeline_id,
+                    {
+                        "type": "log",
+                        "message": (
+                            f"[Scraper] WARNING: Document is exceptionally large "
+                            f"({len(raw_text)} chars). Continuing automatic ingestion."
+                        ),
+                    },
+                )
+
+            await event_manager.publish(
+                pipeline_id,
+                {"type": "log", "message": f"[Scraper] Successfully extracted {len(raw_text)} characters."},
+            )
             
     except Exception as e:
         await event_manager.publish(pipeline_id, {"type": "log", "message": f"[Scraper] Failed to download/parse: {e}"})
